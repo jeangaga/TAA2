@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .trades import MISSING_STRATEGY_TOKENS
+from .config import MISSING_STRATEGY_TOKENS, TOTAL_COLUMN_NAME
 
 
 def build_strategy_returns(asset_returns: pd.DataFrame, trades_open: pd.DataFrame):
@@ -44,7 +44,7 @@ def build_strategy_returns(asset_returns: pd.DataFrame, trades_open: pd.DataFram
         out[strat] = sleeve
 
     if out.shape[1] > 0:
-        out["TAA"] = out.sum(axis=1)
+        out[TOTAL_COLUMN_NAME] = out.sum(axis=1)
 
     missing_df = pd.DataFrame(missing, columns=["Strategy", "MissingAsset"]).drop_duplicates()
     return out, missing_df

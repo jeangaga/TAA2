@@ -12,7 +12,7 @@ import io
 
 import pandas as pd
 
-REQUIRED_TRADE_COLUMNS = ["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate"]
+from .config import REQUIRED_TRADE_COLUMNS  # re-exported for callers
 
 
 def _clean_datetime_frame(df: pd.DataFrame) -> pd.DataFrame:

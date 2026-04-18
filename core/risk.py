@@ -4,8 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-# Annualisation factor for daily series.
-ANN_FACTOR = 252
+from .config import ANN_FACTOR, RISK_FREE_RATE, TOTAL_COLUMN_NAME
 
 
 def compute_cumulative(returns: pd.DataFrame) -> pd.DataFrame:
@@ -19,7 +18,11 @@ def compute_drawdowns(returns: pd.DataFrame) -> pd.DataFrame:
     return cum / cum.cummax() - 1.0
 
 
-def compute_risk_stats(returns: pd.DataFrame, ann: int = ANN_FACTOR, rf: float = 0.0) -> pd.DataFrame:
+def compute_risk_stats(
+    returns: pd.DataFrame,
+    ann: int = ANN_FACTOR,
+    rf: float = RISK_FREE_RATE,
+) -> pd.DataFrame:
     """Annualised return, vol, Sharpe and max drawdown per column."""
     r = returns.fillna(0.0)
     n = max(len(r), 1)
@@ -35,7 +38,10 @@ def compute_risk_stats(returns: pd.DataFrame, ann: int = ANN_FACTOR, rf: float =
     })
 
 
-def compute_risk_contrib(strategy_returns: pd.DataFrame, total_col: str = "TAA") -> pd.DataFrame:
+def compute_risk_contrib(
+    strategy_returns: pd.DataFrame,
+    total_col: str = TOTAL_COLUMN_NAME,
+) -> pd.DataFrame:
     """Approximate marginal contribution of each sleeve to total volatility.
 
     Marginal contribution_i = Cov(sleeve_i, total) / Var(total) × Vol(total)

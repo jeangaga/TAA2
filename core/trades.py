@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-# Tokens treated as "missing" for Strategy / RIC Name string fields.
-MISSING_STRATEGY_TOKENS: set[str] = {"", "nan", "None", "NaN", "NONE", "none"}
+from .config import MISSING_STRATEGY_TOKENS  # re-exported for callers
 
 
 def open_as_of_date(df_trades: pd.DataFrame, as_of_date) -> pd.DataFrame:
