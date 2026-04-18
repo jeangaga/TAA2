@@ -332,7 +332,8 @@ trades_open = open_as_of_date(trades_clean, as_of_ts)
 if strat_filter:
     trades_open = trades_open[trades_open["Strategy"].isin(strat_filter)].reset_index(drop=True)
  
-strategy_returns, missing_assets = build_strategy_returns(asset_returns, trades_open)
+# strategy_returns is computed AFTER the editable data_editor below,
+# so user Size edits propagate to every tab.
  
  
 # ==========================================================================
@@ -355,14 +356,63 @@ tabs = st.tabs([
  
 # --- 1. Open trades ---------------------------------------------------------
 with tabs[0]:
-    st.subheader("Open trades — frozen snapshot")
+    st.subheader("Open trades — frozen snapshot (editable)")
     st.caption(
-        "Positions considered live at end-of-day on the selected as-of date. "
-        "Each row contributes `Size × asset return` to its strategy sleeve."
+        "Edit the **Size** column to run what-if scenarios — Summary, "
+        "Performance and Risk tabs recompute live. "
+        "Edits stay in-session only; they do not modify the uploaded CSV."
     )
     show_cols = [c for c in ["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate"]
                  if c in trades_open.columns]
-    st.dataframe(trades_open[show_cols], use_container_width=True, hide_index=True)
+ 
+    if len(trades_open) == 0:
+        st.info("No open trades at this date — nothing to edit.")
+    else:
+        # Reset button — clears any in-session edits for this snapshot.
+        editor_key = f"trade_editor::{as_of_ts.date()}::{len(trades_open)}"
+        reset_col, _ = st.columns([1, 5])
+        if reset_col.button("Reset sizes to CSV", help="Discard in-session edits."):
+            st.session_state.pop(editor_key, None)
+            st.rerun()
+ 
+        original_gross = trades_open["Size"].abs().sum()
+        edited = st.data_editor(
+            trades_open[show_cols],
+            column_config={
+                "Strategy": st.column_config.TextColumn(disabled=True),
+                "RIC": st.column_config.TextColumn(disabled=True),
+                "RIC Name": st.column_config.TextColumn(disabled=True),
+                "Size": st.column_config.NumberColumn(
+                    "Size",
+                    help="Position size. Equity = % exposure (0.01 = 1%). "
+                         "Rates = duration (e.g. 0.15 = +0.15 years).",
+                    format="%.4f",
+                    step=0.005,
+                ),
+                "EntryDate": st.column_config.DateColumn(disabled=True),
+                "ExitDate": st.column_config.DateColumn(disabled=True),
+            },
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            key=editor_key,
+        )
+ 
+        # Propagate edited sizes back into trades_open so downstream tabs
+        # use the what-if values.
+        trades_open = trades_open.copy()
+        trades_open["Size"] = pd.to_numeric(edited["Size"], errors="coerce").values
+ 
+        # Tiny delta indicator so users can see they've diverged from CSV.
+        edited_gross = trades_open["Size"].abs().sum()
+        delta = edited_gross - original_gross
+        st.caption(
+            f"Gross size (edited book): **{edited_gross:+.4f}**"
+            + (f"  —  Δ vs CSV: **{delta:+.4f}**" if abs(delta) > 1e-9 else "  —  unchanged vs CSV")
+        )
+ 
+# Recompute strategy returns from the (possibly edited) trades_open.
+strategy_returns, missing_assets = build_strategy_returns(asset_returns, trades_open)
  
 # --- 2. Summary by strategy -------------------------------------------------
 with tabs[1]:
@@ -522,3 +572,4 @@ with tabs[4]:
         st.dataframe(rates_levels.head(), use_container_width=True)
         st.caption("Raw trades")
         st.dataframe(trades_raw, use_container_width=True, hide_index=True)
+ 
