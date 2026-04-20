@@ -378,12 +378,16 @@ with tabs[1]:
     if len(current_book) == 0:
         st.warning("Live book is empty — no open trades for the current filter.")
     else:
+        cb_view = current_book.copy()
+        for c in ("Size", "GrossUnderlyingSize", "TradeCount"):
+            if c in cb_view.columns:
+                cb_view[c] = pd.to_numeric(cb_view[c], errors="coerce")
         st.dataframe(
-            current_book.style.format({
+            cb_view.style.format({
                 "Size": "{:+.4f}",
                 "GrossUnderlyingSize": "{:.4f}",
                 "TradeCount": "{:.0f}",
-            }),
+            }, na_rep=""),
             use_container_width=True,
             hide_index=True,
         )
@@ -524,7 +528,9 @@ with tabs[2]:
             "Net": float(size.sum()),
         })
     st.dataframe(
-        pd.DataFrame(rows).style.format({"Gross": "{:+.4f}", "Net": "{:+.4f}"}),
+        pd.DataFrame(rows).style.format(
+            {"Gross": "{:+.4f}", "Net": "{:+.4f}"}, na_rep=""
+        ),
         use_container_width=True, hide_index=True,
     )
 
@@ -596,10 +602,12 @@ with tabs[2]:
     if len(insp_book) == 0:
         st.info("Book is empty.")
     else:
+        insp_view = insp_book.reindex(
+            columns=["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate", "Comment"]
+        ).copy()
+        insp_view["Size"] = pd.to_numeric(insp_view["Size"], errors="coerce")
         st.dataframe(
-            insp_book.reindex(
-                columns=["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate", "Comment"]
-            ).style.format({"Size": "{:+.4f}"}),
+            insp_view.style.format({"Size": "{:+.4f}"}, na_rep=""),
             use_container_width=True, hide_index=True,
         )
 
@@ -623,6 +631,53 @@ with tabs[2]:
 
 
 # --------------------------------------------------------------------------
+# Shared in-tab Working book picker (Performance + Risk).
+# One source of truth — `st.session_state["working_book_name"]` — surfaced
+# as a widget in three places: sidebar, Performance tab, Risk tab. Each
+# in-tab widget uses its own key and mirrors session state, so Streamlit
+# doesn't complain about duplicate keys.
+# --------------------------------------------------------------------------
+def _working_book_picker_block(location_key: str, library: Dict[str, pd.DataFrame]) -> str:
+    library_keys = list(library.keys())
+    current = st.session_state.get("working_book_name", "Current")
+    if current not in library_keys:
+        current = library_keys[0] if library_keys else "Current"
+    idx = library_keys.index(current) if current in library_keys else 0
+    cols = st.columns([3, 1, 1])
+    picked = cols[0].selectbox(
+        "Working book",
+        library_keys,
+        index=idx,
+        key=f"working_book_picker__{location_key}",
+        help=(
+            "Shared with the sidebar selector — changing either one drives "
+            "both the Performance and Risk tabs."
+        ),
+    )
+    book = library.get(picked, pd.DataFrame())
+    cols[1].metric("Lines", len(book))
+    cols[2].metric(
+        "Strategies",
+        int(book["Strategy"].nunique()) if len(book) and "Strategy" in book.columns else 0,
+    )
+    if picked == "Scenario (editable)":
+        st.caption(
+            "**Live book** — reflects the latest edits in the **Editable "
+            "Scenario** tab on every rerun."
+        )
+    else:
+        st.caption(
+            f"**Frozen book** — snapshot of `{picked}` at load time; not "
+            "affected by edits in the Editable Scenario tab."
+        )
+    # Mirror back into the shared state so the sidebar stays in sync.
+    if picked != st.session_state.get("working_book_name"):
+        st.session_state["working_book_name"] = picked
+        st.rerun()
+    return picked
+
+
+# --------------------------------------------------------------------------
 # Run portfolio engine on the WORKING book (drives Performance/Risk tabs).
 # The live `Current` book is also run through the engine for Data Quality
 # so trade-level missing-asset warnings stay tied to the official input.
@@ -643,10 +698,10 @@ with tabs[4]:
     st.subheader(f"Historical performance — `{working_book_name}`")
     st.caption(
         "Returns of the working book, held at constant exposure through "
-        "the full market-data history. Switch the **Working book** in "
-        "the sidebar to recompute this view against any book in the "
-        "library."
+        "the full market-data history. Change the **Working book** here "
+        "or in the sidebar — both stay in sync."
     )
+    _working_book_picker_block("performance", library)
     if strategy_returns.empty or strategy_returns.shape[1] == 0:
         st.warning("No strategy return series to plot for this book.")
     else:
@@ -668,8 +723,10 @@ with tabs[4]:
 with tabs[5]:
     st.subheader(f"Risk statistics — `{working_book_name}`")
     st.caption(
-        "All tables reflect the **Working book** selected in the sidebar."
+        "All tables reflect the **Working book**. Change it here or in "
+        "the sidebar — both stay in sync."
     )
+    _working_book_picker_block("risk", library)
     if strategy_returns.empty or strategy_returns.shape[1] == 0:
         st.warning("No strategy returns available for this book.")
     else:
@@ -680,7 +737,7 @@ with tabs[5]:
                 "Ann.Vol": "{:.2%}",
                 "Sharpe": "{:.2f}",
                 "Max.Drawdown": "{:.2%}",
-            }),
+            }, na_rep=""),
             use_container_width=True,
         )
 
@@ -700,7 +757,7 @@ with tabs[5]:
                 rc.style.format({
                     "MarginalContribution": "{:.4f}",
                     "ContribPct": "{:.2f}%",
-                }),
+                }, na_rep=""),
                 use_container_width=True,
             )
 
@@ -711,7 +768,10 @@ with tabs[5]:
                 values="Size", aggfunc="sum", fill_value=0.0,
             )
             expo["TotalNet"] = expo.sum(axis=1)
-            st.dataframe(expo.style.format("{:+.4f}"), use_container_width=True)
+            st.dataframe(
+                expo.apply(pd.to_numeric, errors="coerce").style.format("{:+.4f}", na_rep=""),
+                use_container_width=True,
+            )
             fig_expo = plotting.plot_exposure_heatmap(
                 expo.drop(columns="TotalNet"),
                 title="Exposure heatmap (blue = short, red = long)",
@@ -754,11 +814,14 @@ with tabs[6]:
         for name in candidates:
             rows.append({"Book": name, **books.book_level_summary(library[name], asset_returns)})
         kpi = pd.DataFrame(rows).set_index("Book")
+        for _c in ("Gross", "Net", "Vol", "AnnVol"):
+            if _c in kpi.columns:
+                kpi[_c] = pd.to_numeric(kpi[_c], errors="coerce")
         st.dataframe(
             kpi.style.format({
                 "Gross": "{:+.4f}", "Net": "{:+.4f}",
                 "Vol": "{:.4%}", "AnnVol": "{:.2%}",
-            }),
+            }, na_rep=""),
             use_container_width=True,
         )
 
@@ -767,15 +830,21 @@ with tabs[6]:
         for name in candidates:
             with st.expander(f"Strategy table · {name} vs {base_name}", expanded=True):
                 tbl = books.strategy_level_delta(baseline, library[name], asset_returns)
+                tbl = tbl.copy()
+                for _c in tbl.columns:
+                    if _c != "Strategy":
+                        tbl[_c] = pd.to_numeric(tbl[_c], errors="coerce")
+                fmt = {
+                    c: "{:+.4f}" for c in tbl.columns
+                    if c != "Strategy" and not c.startswith("RiskContribPct")
+                }
+                fmt.update({
+                    "RiskContribPct_base": "{:.1f}%",
+                    "RiskContribPct_cand": "{:.1f}%",
+                    "RiskContribPct_Δ": "{:+.1f}%",
+                })
                 st.dataframe(
-                    tbl.style.format({
-                        c: "{:+.4f}" for c in tbl.columns
-                        if c not in ("Strategy",) and not c.endswith("_RiskContribPct")
-                    } | {
-                        "RiskContribPct_base": "{:.1f}%",
-                        "RiskContribPct_cand": "{:.1f}%",
-                        "RiskContribPct_Δ": "{:+.1f}%",
-                    }),
+                    tbl.style.format(fmt, na_rep=""),
                     use_container_width=True, hide_index=True,
                 )
 
@@ -788,12 +857,16 @@ with tabs[6]:
                     "Show only changed rows", value=True, key=f"only_changed::{name}",
                 )
                 view = pos[pos["Status"] != "unchanged"] if only_changed else pos
+                view = view.copy()
+                for _c in ("OldSize", "NewSize", "Delta"):
+                    if _c in view.columns:
+                        view[_c] = pd.to_numeric(view[_c], errors="coerce")
                 st.dataframe(
                     view.style.format({
                         "OldSize": "{:+.4f}",
                         "NewSize": "{:+.4f}",
                         "Delta": "{:+.4f}",
-                    }),
+                    }, na_rep=""),
                     use_container_width=True, hide_index=True,
                 )
 
