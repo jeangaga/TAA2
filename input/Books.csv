@@ -1,0 +1,5 @@
+BookName,Strategy,AssetClass,RIC,RIC Name,Size,EntryDate,ExitDate,Comment
+Book 1,EQ Beta,Equity,SPX,S&P 500 Index,0.0200,2026-01-01,,Core US beta
+Book 1,US Rates,Rates,US5Y,US 5Y Treasury,0.5000,2026-01-01,,Long duration expression
+Book 2,Europe Equity,Equity,SX5E,Euro Stoxx 50 Index,0.0200,2026-01-01,,Europe beta
+Book 2,US Equity,Equity,SPX,S&P 500 Index,0.0100,2026-01-01,,Smaller US beta
