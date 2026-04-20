@@ -299,24 +299,29 @@ button so re-uploading without clicking import does not clobber the
 library. As-of-date picker and a strategy filter scope the official
 `Current` book.
 
-**Working book** — one source of truth
-(`st.session_state["working_book_name"]`) surfaced via three widgets
-that all stay in sync: a sidebar selector plus an in-tab selector at
-the top of the Performance and Risk tabs. Each widget uses a distinct
-Streamlit `key` (`working_book_name` for the sidebar,
-`working_book_picker__performance` / `working_book_picker__risk` in
-the tabs); the in-tab helper `_working_book_picker_block` mirrors the
-chosen value back to the shared state and reruns, so the sidebar
-stays aligned on the next pass. The in-tab block also shows `Lines` /
-`Strategies` metadata and flags the selected book as **Live** (if the
-scenario book) or **Frozen**. Default is `Current`; any book in the
-library is eligible (imported, generated, scenario, snapshot). The
-portfolio engine is called twice per rerun: once on the working book
-(for Performance/Risk) and once on `Current` (so the Data Quality
-tab's missing-asset warnings stay tied to the official input). When
-the working book is `Scenario (editable)`, Performance/Risk reflect
-the latest edits in the Editable Scenario tab on every rerun because
-`_refresh_library` rebuilds `library["Scenario (editable)"]` from
+**Working book** — one canonical session value
+(`st.session_state["working_book_name"]`, NOT bound to any widget)
+surfaced via three widgets that all stay in sync: a sidebar selector
+plus an in-tab selector at the top of the Performance and Risk tabs.
+Each widget has its own private key (`wb_picker__sidebar`,
+`wb_picker__performance`, `wb_picker__risk`). Before each widget is
+instantiated, its session-state is pre-synced from the shared key
+(this is legal; writing to a widget-bound key *after* instantiation
+is not — which is why the shared key is deliberately not a widget
+key). Each widget has an `on_change` callback
+(`_sync_working_book_from`) that copies the new value into the shared
+key, which Streamlit then propagates to the other two widgets on the
+automatic rerun — no explicit `st.rerun()` needed. The in-tab block
+also shows `Lines` / `Strategies` metadata and flags the selected
+book as **Live** (if the scenario book) or **Frozen**. Default is
+`Current`; any book in the library is eligible (imported, generated,
+scenario, snapshot). The portfolio engine is called twice per rerun:
+once on the working book (for Performance/Risk) and once on `Current`
+(so the Data Quality tab's missing-asset warnings stay tied to the
+official input). When the working book is `Scenario (editable)`,
+Performance/Risk reflect the latest edits in the Editable Scenario
+tab on every rerun because `_refresh_library` rebuilds
+`library["Scenario (editable)"]` from
 `st.session_state.scenario_book` before the engine runs.
 
 ### Tabs (left-to-right)

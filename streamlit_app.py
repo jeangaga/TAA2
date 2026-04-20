@@ -299,21 +299,52 @@ library = _refresh_library(current_book)
 
 
 # --------------------------------------------------------------------------
-# Sidebar — working book selector (drives Performance / Risk on the fly)
+# Working book — one shared state key, three widgets (sidebar, Performance,
+# Risk), all kept in sync.
+#
+# Streamlit rule: you can't write to `st.session_state[k]` if `k` is bound
+# to an already-rendered widget. So we can't reuse `"working_book_name"` as
+# a widget key AND mutate it from another tab's picker. Instead:
+#   * `working_book_name`   → canonical shared state (plain session key)
+#   * `wb_picker__sidebar`, `wb_picker__performance`, `wb_picker__risk`
+#       → per-widget keys. Pre-synced from the shared key BEFORE each
+#         widget is instantiated (legal). On change, an `on_change`
+#         callback copies the widget value back into the shared key.
 # --------------------------------------------------------------------------
+def _sync_working_book_from(widget_key: str) -> None:
+    """Callback — copy a widget's value into the shared working-book key."""
+    st.session_state["working_book_name"] = st.session_state[widget_key]
+
+
+def _ensure_working_book(library_keys: list) -> str:
+    """Return a valid shared `working_book_name`, repairing stale values."""
+    current = st.session_state.get("working_book_name", "Current")
+    if current not in library_keys:
+        current = library_keys[0] if library_keys else "Current"
+        st.session_state["working_book_name"] = current
+    return current
+
+
 st.sidebar.divider()
 st.sidebar.subheader("Working book")
 st.sidebar.caption("Drives the Performance and Risk tabs.")
 _book_names = list(library.keys())
-_prev_wb = st.session_state.get("working_book_name", "Current")
-_wb_index = _book_names.index(_prev_wb) if _prev_wb in _book_names else 0
-working_book_name = st.sidebar.selectbox(
-    "Book", _book_names, index=_wb_index, key="working_book_name",
+_shared = _ensure_working_book(_book_names)
+# Pre-sync the sidebar widget state to the shared key before instantiation.
+st.session_state["wb_picker__sidebar"] = _shared
+st.sidebar.selectbox(
+    "Book",
+    _book_names,
+    key="wb_picker__sidebar",
+    on_change=_sync_working_book_from,
+    args=("wb_picker__sidebar",),
     help=(
         "Switch which book Performance / Risk are computed against. "
+        "Shared with the in-tab pickers — all three stay in sync. "
         "`Current` is the official live book from Trades.csv."
     ),
 )
+working_book_name = st.session_state["working_book_name"]
 working_book = library[working_book_name]
 
 
@@ -632,28 +663,33 @@ with tabs[2]:
 
 # --------------------------------------------------------------------------
 # Shared in-tab Working book picker (Performance + Risk).
-# One source of truth — `st.session_state["working_book_name"]` — surfaced
-# as a widget in three places: sidebar, Performance tab, Risk tab. Each
-# in-tab widget uses its own key and mirrors session state, so Streamlit
-# doesn't complain about duplicate keys.
+# Uses the sidebar's shared-state pattern: each widget has its own key,
+# pre-synced from `working_book_name`, with an `on_change` callback that
+# writes back. This is the only pattern Streamlit allows when the same
+# logical control needs to live in multiple places (you can't write to a
+# widget-bound session-state key mid-run).
 # --------------------------------------------------------------------------
 def _working_book_picker_block(location_key: str, library: Dict[str, pd.DataFrame]) -> str:
     library_keys = list(library.keys())
-    current = st.session_state.get("working_book_name", "Current")
-    if current not in library_keys:
-        current = library_keys[0] if library_keys else "Current"
-    idx = library_keys.index(current) if current in library_keys else 0
+    current = _ensure_working_book(library_keys)
+    wkey = f"wb_picker__{location_key}"
+    # Pre-sync widget state from the shared key. Legal *before* the
+    # widget is instantiated, which is why this isn't done in a callback.
+    st.session_state[wkey] = current
+
     cols = st.columns([3, 1, 1])
-    picked = cols[0].selectbox(
+    cols[0].selectbox(
         "Working book",
         library_keys,
-        index=idx,
-        key=f"working_book_picker__{location_key}",
+        key=wkey,
+        on_change=_sync_working_book_from,
+        args=(wkey,),
         help=(
             "Shared with the sidebar selector — changing either one drives "
             "both the Performance and Risk tabs."
         ),
     )
+    picked = st.session_state["working_book_name"]
     book = library.get(picked, pd.DataFrame())
     cols[1].metric("Lines", len(book))
     cols[2].metric(
@@ -670,10 +706,6 @@ def _working_book_picker_block(location_key: str, library: Dict[str, pd.DataFram
             f"**Frozen book** — snapshot of `{picked}` at load time; not "
             "affected by edits in the Editable Scenario tab."
         )
-    # Mirror back into the shared state so the sidebar stays in sync.
-    if picked != st.session_state.get("working_book_name"):
-        st.session_state["working_book_name"] = picked
-        st.rerun()
     return picked
 
 
