@@ -168,6 +168,70 @@ the app.
 
 ---
 
+## `core/books.py`
+
+Book abstraction for portfolio construction and scenario comparison.
+A *book* is one row per `Strategy x RIC x RIC Name` — the normalised
+shape the portfolio engine ultimately consumes.
+
+- **`BOOK_COLUMNS`** — the normalised column order every book exposes:
+  `BookName, Strategy, AssetClass, RIC, RIC Name, Size, EntryDate,
+  ExitDate, Comment, TradeCount, GrossUnderlyingSize`.
+- **`BOOKS_CSV_REQUIRED`** — minimum columns expected in `Books.csv`:
+  `BookName, Strategy, RIC, RIC Name, Size, EntryDate`.
+
+- **`trades_to_live_book(trades_open, book_name="Current") → DataFrame`**
+  Aggregates the open-trade snapshot into the official live book.
+  Aggregation key is `Strategy x RIC x RIC Name` (positions never merge
+  across strategies). `Size` is summed; `TradeCount` and
+  `GrossUnderlyingSize` are preserved as diagnostics. Drops rows with
+  missing strategy / RIC / zero size.
+
+- **`load_books_csv(file_bytes) → {name: DataFrame}`** — Loads a
+  `Books.csv` library, splits by `BookName`, and returns each as a
+  fully-conformed book frame. Dates parse as ISO `YYYY-MM-DD` (other
+  formats coerce). Raises `ValueError` if required columns are missing.
+
+- **`book_to_books_csv(books) → bytes`** — Inverse serialiser; ISO
+  dates on output. Useful for export.
+
+- **`book_to_trades_frame(book) → DataFrame`** — Adapts a book back to
+  the `Strategy / RIC / RIC Name / Size` shape that
+  `portfolio.build_strategy_returns` expects. Lets the existing engine
+  run on any book without changes.
+
+- **`scale_whole_book(book, factor, new_name) → DataFrame`** — Scales
+  every `Size` by `factor`.
+
+- **`scale_selected_strategies(book, strategies, factor, new_name) → DataFrame`**
+  — Scales only rows in the chosen strategies.
+
+- **`equal_vol_book(book, asset_returns, target_vol=None, new_name) → DataFrame`**
+  — Rescales each strategy so its sleeve carries the same ex-ante
+  vol. If `target_vol` is omitted, uses the average of the current
+  sleeve vols so total notional stays in the same ballpark.
+
+- **`book_level_summary(book, asset_returns) → dict`** — KPIs:
+  `Lines`, `Gross`, `Net`, `Vol` (daily), `AnnVol`.
+
+- **`strategy_level_summary(book, asset_returns) → DataFrame`** — One
+  row per strategy with `Lines / Gross / Net / AnnVol /
+  RiskContribPct`.
+
+- **`strategy_level_delta(baseline, candidate, asset_returns) → DataFrame`**
+  — Side-by-side strategy table with `_base / _cand / _Δ` columns for
+  Gross, Net, AnnVol and RiskContribPct.
+
+- **`position_level_delta(baseline, candidate) → DataFrame`** — Diff
+  keyed on `Strategy x RIC x RIC Name`: `OldSize / NewSize / Delta /
+  Status` (`added / removed / resized / unchanged`).
+
+- **`cumulative_performance(books, asset_returns) → DataFrame`** —
+  Growth-of-1 series of each book's TAA total, aligned on a single
+  date axis. Drives the comparison performance overlay.
+
+---
+
 ## `utils/plotting.py`
 
 Plotly figure builders. Each helper returns a `go.Figure` that the
@@ -195,34 +259,62 @@ caller renders with `st.plotly_chart`. Streamlit-free.
 ## `streamlit_app.py`
 
 UI layer. **No business logic** — everything delegates to `core/*` and
-`utils/plotting.py`. There are no functions defined here; it's straight
-Streamlit script that runs top-to-bottom on every interaction. Logical
-sections:
+`utils/plotting.py`. There are no functions defined here; it's a
+Streamlit script that runs top-to-bottom on every interaction.
 
-The **cache layer** wraps three pure loaders from `core.data` with
-`st.cache_data` so the heavy CSV parse only runs when an upload
-changes. **Sidebar block** handles the three file uploaders, the
-as-of-date picker (auto-defaulted to the latest trade date, clipped to
-the available market-data range), and a multi-select strategy filter.
-**Returns block** calls `returns.compute_price_returns` and
-`returns.compute_rate_returns`, joins them on date, and runs
-`trades.clean_trades` to split valid from rejected rows. The **header**
-shows four metrics (as-of date, open trades, strategies open, assets
-tradable) and creates the five tabs.
+### Layered model
 
-The **Open Trades tab** shows the snapshot in a `st.data_editor` with
-only `Size` editable (other columns are locked), gated by an editor key
-that resets when the as-of-date changes. After the editor, sizes are
-written back into `trades_open`, and
-`portfolio.build_strategy_returns` is called once — placing this call
-**after** the editor is what makes Summary, Performance and Risk tabs
-recompute from the edited values.
+The app surfaces three explicit layers, plus a books library on top:
 
-The **Summary tab** groups by Strategy for trade count / gross / net
-size and pivots into the exposure matrix plus a heatmap.
-**Performance** shows cumulative and drawdown charts. **Risk** shows
-the stats table, a correlation heatmap, and the marginal-contribution
-table. **Data Quality** surfaces rejected blotter rows, trades
-referencing unknown assets, missing-asset warnings from
-`build_strategy_returns`, and a small diagnostics table, with a
-raw-inputs preview tucked into an expander.
+* **Raw trades** — `Trades.csv`, filtered by as-of date. Read-only.
+* **Live book** — derived from raw trades via
+  `books.trades_to_live_book`. One row per `Strategy x RIC x RIC
+  Name`. This is the official `Current` book.
+* **Editable scenario** — a working copy seeded from the live book.
+  Sizes can be edited, rows added/removed, new strategy labels
+  created. Edits never touch the raw trades or live book.
+
+The **books library** is a session-state dict keyed on book name. It
+combines `Current` (always from `Trades.csv`), `Scenario (editable)`,
+imported books from `Books.csv`, generated books (`scale_whole_book`,
+`equal_vol_book`, `scale_selected_strategies`), and saved snapshots.
+
+### Sidebar
+
+**GitHub quick-load** — a **Load all from GitHub** button fetches the
+four CSVs (`TAAEQDaily`, `TAAratesDaily`, `TradesPAT`, `Books`)
+directly from `https://github.com/jeangaga/TAA2/tree/main/input` via
+`urllib.request` against `raw.githubusercontent.com`. Fetched bytes
+live in `st.session_state` under `gh_eq / gh_rates / gh_trades /
+gh_books` and are cached by URL through `st.cache_data` so reruns are
+free. `Books.csv` is auto-imported into the library on successful
+pull. A **Clear GitHub** button discards those bytes without touching
+manual uploads.
+
+Uploaders for prices, yields, `Trades.csv`, and `Books.csv` still work
+and always win over the GitHub copy (resolved by the `_bytes_for`
+helper), so the user can override individual files after a pull.
+`Books.csv` upload is gated behind an explicit **Import Books.csv**
+button so re-uploading without clicking import does not clobber the
+library. As-of-date picker and a strategy filter scope the official
+`Current` book.
+
+### Tabs
+
+* **Raw Trades (audit)** — filtered open-trade rows, read-only.
+* **Live Book** — read-only display of the aggregated `Current` book.
+* **Editable Scenario** — `st.data_editor` over the scenario book with
+  `num_rows="dynamic"`, a Strategy combobox sourced from existing +
+  scenario strategies, and a snapshot saver.
+* **Books Library** — table of every book in the library; generators
+  for scaled / equal-vol / selected-strategy-scaled books; an
+  inspector; a remover for imported / generated / snapshot books.
+* **Book Comparison** — baseline selector (default `Current`),
+  multi-select `Compare vs`, then book-level KPIs, per-candidate
+  strategy-level delta tables, position-level diff tables, and a
+  cumulative-performance overlay.
+* **Performance / Risk** — driven by the live book through
+  `books.book_to_trades_frame` + `portfolio.build_strategy_returns`,
+  preserving the original engine.
+* **Data Quality** — rejected rows, unknown-asset warnings, blotter
+  diagnostics (now including live-book line count and library size).
