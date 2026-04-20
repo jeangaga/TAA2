@@ -717,12 +717,68 @@ def _working_book_picker_block(location_key: str, library: Dict[str, pd.DataFram
 # so trade-level missing-asset warnings stay tied to the official input.
 # --------------------------------------------------------------------------
 working_book = library.get(working_book_name, current_book)
-strategy_returns, _ = portfolio.build_strategy_returns(
-    asset_returns, books.book_to_trades_frame(working_book),
+working_trades_like = books.book_to_trades_frame(working_book)
+strategy_returns, working_missing = portfolio.build_strategy_returns(
+    asset_returns, working_trades_like,
 )
 _, missing_assets = portfolio.build_strategy_returns(
     asset_returns, books.book_to_trades_frame(current_book),
 )
+
+# Sanity flags for the working book — used to render targeted warnings
+# inside the Performance and Risk tabs so silent-all-zero sleeves never
+# look like clean data.
+_wb_size_col = pd.to_numeric(working_book.get("Size"), errors="coerce") if len(working_book) else pd.Series(dtype=float)
+working_book_gross = float(_wb_size_col.abs().sum()) if len(_wb_size_col) else 0.0
+working_book_has_any_match = False
+if len(working_trades_like) and len(asset_returns.columns):
+    working_book_has_any_match = bool(
+        working_trades_like["RIC Name"].isin(asset_returns.columns).any()
+    )
+
+
+def _render_working_book_diagnostics() -> None:
+    """Explain why Performance/Risk look flat, if they do."""
+    if len(working_book) == 0:
+        st.warning(
+            f"The working book **{working_book_name}** is empty — "
+            "nothing to compute."
+        )
+        return
+    if working_book_gross == 0.0:
+        st.warning(
+            f"The working book **{working_book_name}** has gross "
+            "exposure of zero. Every position will contribute 0 to the "
+            "sleeve and TAA series."
+        )
+        return
+    if not working_book_has_any_match:
+        unmatched = sorted(set(working_trades_like["RIC Name"].dropna().astype(str)))
+        st.error(
+            f"None of the `RIC Name` values in **{working_book_name}** "
+            "match a column in the price / rate files — every sleeve is "
+            "forced to zero. Check that the book's `RIC Name` matches the "
+            "column headers in `TAAEQDaily.csv` / `TAAratesDaily.csv` "
+            "(case-sensitive, whitespace-sensitive)."
+        )
+        with st.expander("Unmatched RIC Names in working book"):
+            st.write(unmatched)
+            st.caption(
+                "Available asset columns: "
+                + ", ".join(sorted(asset_returns.columns.astype(str)))
+            )
+        return
+    if not working_missing.empty:
+        st.warning(
+            f"{len(working_missing)} position(s) in **{working_book_name}** "
+            "reference a `RIC Name` that is not in the price / rate files "
+            "— those sleeves silently contribute zero. The other positions "
+            "still compute normally."
+        )
+        with st.expander("Positions with unmatched RIC Names"):
+            st.dataframe(
+                working_missing, use_container_width=True, hide_index=True,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -736,6 +792,7 @@ with tabs[4]:
         "or in the sidebar — both stay in sync."
     )
     _working_book_picker_block("performance", library)
+    _render_working_book_diagnostics()
     if strategy_returns.empty or strategy_returns.shape[1] == 0:
         st.warning("No strategy return series to plot for this book.")
     else:
@@ -761,6 +818,7 @@ with tabs[5]:
         "the sidebar — both stay in sync."
     )
     _working_book_picker_block("risk", library)
+    _render_working_book_diagnostics()
     if strategy_returns.empty or strategy_returns.shape[1] == 0:
         st.warning("No strategy returns available for this book.")
     else:
