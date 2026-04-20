@@ -317,11 +317,13 @@ def _sync_working_book_from(widget_key: str) -> None:
 
 
 def _ensure_working_book(library_keys: list) -> str:
-    """Return a valid shared `working_book_name`, repairing stale values."""
+    """Return a valid shared `working_book_name`, always persisting it."""
     current = st.session_state.get("working_book_name", "Current")
     if current not in library_keys:
         current = library_keys[0] if library_keys else "Current"
-        st.session_state["working_book_name"] = current
+    # Always write back — on a fresh session the key doesn't exist yet,
+    # and the sidebar/tab code that follows will raise KeyError otherwise.
+    st.session_state["working_book_name"] = current
     return current
 
 
