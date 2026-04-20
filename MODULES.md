@@ -299,22 +299,38 @@ button so re-uploading without clicking import does not clobber the
 library. As-of-date picker and a strategy filter scope the official
 `Current` book.
 
-### Tabs
+**Working book** — a sidebar selector that picks which book drives
+the Performance and Risk tabs. Default is `Current`; any book in the
+library is eligible (imported, generated, scenario, snapshot). The
+choice is persisted in `st.session_state["working_book_name"]`, so
+switching across reruns is cheap and reactive. The portfolio engine
+is called twice per rerun: once on the working book (for
+Performance/Risk) and once on `Current` (so the Data Quality tab's
+missing-asset warnings stay tied to the official input).
 
-* **Raw Trades (audit)** — filtered open-trade rows, read-only.
-* **Live Book** — read-only display of the aggregated `Current` book.
-* **Editable Scenario** — `st.data_editor` over the scenario book with
-  `num_rows="dynamic"`, a Strategy combobox sourced from existing +
-  scenario strategies, and a snapshot saver.
-* **Books Library** — table of every book in the library; generators
-  for scaled / equal-vol / selected-strategy-scaled books; an
-  inspector; a remover for imported / generated / snapshot books.
-* **Book Comparison** — baseline selector (default `Current`),
-  multi-select `Compare vs`, then book-level KPIs, per-candidate
-  strategy-level delta tables, position-level diff tables, and a
-  cumulative-performance overlay.
-* **Performance / Risk** — driven by the live book through
-  `books.book_to_trades_frame` + `portfolio.build_strategy_returns`,
-  preserving the original engine.
-* **Data Quality** — rejected rows, unknown-asset warnings, blotter
-  diagnostics (now including live-book line count and library size).
+### Tabs (left-to-right)
+
+1. **Raw Trades (audit)** — filtered open-trade rows, read-only.
+2. **Live Book** — read-only display of the aggregated `Current` book.
+3. **Books Library** — table of every book in the library; generators
+   for scaled / equal-vol / selected-strategy-scaled books; an
+   inspector; a remover for imported / generated / snapshot books.
+4. **Editable Scenario** — `st.data_editor` over the scenario book
+   with `num_rows="dynamic"`, a Strategy combobox sourced from
+   existing + scenario strategies, and a snapshot saver. The seed
+   flow is a **Seed from** dropdown that lists every book in the
+   library (Live `Current`, imported, generated, snapshot) plus a
+   **Seed** button — copying any of them into the scenario layer.
+5. **Performance** — cumulative + drawdown chart for the **Working
+   book** (sidebar selector), via `book_to_trades_frame` +
+   `portfolio.build_strategy_returns`.
+6. **Risk** — risk stats, correlation, marginal contribution and
+   exposure heatmap for the **Working book**.
+7. **Book Comparison** — baseline selector (default `Current`),
+   multi-select `Compare vs`, then book-level KPIs, per-candidate
+   strategy-level delta tables, position-level diff tables, and a
+   cumulative-performance overlay.
+8. **Data Quality** — rejected rows, unknown-asset warnings, blotter
+   diagnostics (now including live-book line count and library size).
+   Always audits the official `Current` input regardless of which
+   working book is selected.

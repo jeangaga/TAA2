@@ -299,24 +299,44 @@ library = _refresh_library(current_book)
 
 
 # --------------------------------------------------------------------------
+# Sidebar — working book selector (drives Performance / Risk on the fly)
+# --------------------------------------------------------------------------
+st.sidebar.divider()
+st.sidebar.subheader("Working book")
+st.sidebar.caption("Drives the Performance and Risk tabs.")
+_book_names = list(library.keys())
+_prev_wb = st.session_state.get("working_book_name", "Current")
+_wb_index = _book_names.index(_prev_wb) if _prev_wb in _book_names else 0
+working_book_name = st.sidebar.selectbox(
+    "Book", _book_names, index=_wb_index, key="working_book_name",
+    help=(
+        "Switch which book Performance / Risk are computed against. "
+        "`Current` is the official live book from Trades.csv."
+    ),
+)
+working_book = library[working_book_name]
+
+
+# --------------------------------------------------------------------------
 # Header
 # --------------------------------------------------------------------------
 st.title("TAA Trade Book")
-top_cols = st.columns(5)
+top_cols = st.columns(6)
 top_cols[0].metric("As-of date", str(as_of_ts.date()))
 top_cols[1].metric("Open trades", len(trades_open))
 top_cols[2].metric("Live-book lines", len(current_book))
 top_cols[3].metric("Strategies open", current_book["Strategy"].nunique() if len(current_book) else 0)
 top_cols[4].metric("Books in library", len(library))
+top_cols[5].metric("Working book", working_book_name)
 
 tabs = st.tabs([
     "Raw Trades (audit)",
     "Live Book",
-    "Editable Scenario",
     "Books Library",
-    "Book Comparison",
+    "Editable Scenario",
     "Performance",
     "Risk",
+    "Book Comparison",
     "Data Quality",
 ])
 
@@ -375,23 +395,35 @@ with tabs[1]:
 
 
 # --------------------------------------------------------------------------
-# 3. Editable scenario book
+# 4. Editable scenario book
 # --------------------------------------------------------------------------
-with tabs[2]:
+with tabs[3]:
     st.subheader("Editable scenario book")
     st.caption(
-        "A working copy of the live book. Edits live in session and "
-        "produce the **Scenario (editable)** book in the library — they "
+        "A working copy seeded from any book in the library. Edits live "
+        "in session and produce the **Scenario (editable)** book — they "
         "never touch `Trades.csv` or the official live book."
     )
 
-    seed_col, reset_col, _ = st.columns([1, 1, 4])
-    if seed_col.button(
-        "Seed from live book",
-        help="Copy the current live book into the scenario layer, replacing any in-progress edits.",
+    # Seed source dropdown: any book in the library except the scenario itself.
+    seed_options = [n for n in library.keys() if n != "Scenario (editable)"]
+    seed_default = "Current" if "Current" in seed_options else (seed_options[0] if seed_options else None)
+    seed_picker_col, seed_btn_col, reset_col, _ = st.columns([2, 1, 1, 2])
+    seed_from_name = seed_picker_col.selectbox(
+        "Seed from",
+        seed_options,
+        index=seed_options.index(seed_default) if seed_default in seed_options else 0,
+        key="scenario_seed_source",
+        help="Pick any book — Live (`Current`), imported, generated or snapshot — to copy into the scenario layer.",
+    )
+    if seed_btn_col.button(
+        "Seed",
+        help="Copy the chosen book into the scenario layer, replacing any in-progress edits.",
+        disabled=seed_from_name is None,
     ):
-        st.session_state.scenario_book = current_book.copy()
-        st.session_state.scenario_book["BookName"] = "Scenario"
+        src = library[seed_from_name].copy()
+        src["BookName"] = "Scenario"
+        st.session_state.scenario_book = src.reindex(columns=books.BOOK_COLUMNS)
         st.rerun()
 
     if reset_col.button(
@@ -404,8 +436,8 @@ with tabs[2]:
 
     if st.session_state.scenario_book is None:
         st.info(
-            "No scenario book yet. Click **Seed from live book** to start "
-            "from the current `Current` book."
+            "No scenario book yet. Pick a source above and click **Seed** "
+            "to copy it into the editable layer."
         )
     else:
         sb = st.session_state.scenario_book.copy()
@@ -471,9 +503,9 @@ library = _refresh_library(current_book)
 
 
 # --------------------------------------------------------------------------
-# 4. Books library — list, generate, manage
+# 3. Books library — list, generate, manage
 # --------------------------------------------------------------------------
-with tabs[3]:
+with tabs[2]:
     st.subheader("Books library")
     st.caption(
         "All books available for comparison. `Current` is sourced from "
@@ -591,9 +623,107 @@ with tabs[3]:
 
 
 # --------------------------------------------------------------------------
-# 5. Book comparison
+# Run portfolio engine on the WORKING book (drives Performance/Risk tabs).
+# The live `Current` book is also run through the engine for Data Quality
+# so trade-level missing-asset warnings stay tied to the official input.
+# --------------------------------------------------------------------------
+working_book = library.get(working_book_name, current_book)
+strategy_returns, _ = portfolio.build_strategy_returns(
+    asset_returns, books.book_to_trades_frame(working_book),
+)
+_, missing_assets = portfolio.build_strategy_returns(
+    asset_returns, books.book_to_trades_frame(current_book),
+)
+
+
+# --------------------------------------------------------------------------
+# 5. Performance
 # --------------------------------------------------------------------------
 with tabs[4]:
+    st.subheader(f"Historical performance — `{working_book_name}`")
+    st.caption(
+        "Returns of the working book, held at constant exposure through "
+        "the full market-data history. Switch the **Working book** in "
+        "the sidebar to recompute this view against any book in the "
+        "library."
+    )
+    if strategy_returns.empty or strategy_returns.shape[1] == 0:
+        st.warning("No strategy return series to plot for this book.")
+    else:
+        cum = risk.compute_cumulative(strategy_returns)
+        st.plotly_chart(
+            plotting.plot_cumulative(cum, f"Strategies + TAA — Cumulative Performance ({working_book_name})"),
+            use_container_width=True,
+        )
+        dd = risk.compute_drawdowns(strategy_returns)
+        st.plotly_chart(
+            plotting.plot_drawdowns(dd, f"Strategies + TAA — Drawdowns ({working_book_name})"),
+            use_container_width=True,
+        )
+
+
+# --------------------------------------------------------------------------
+# 6. Risk
+# --------------------------------------------------------------------------
+with tabs[5]:
+    st.subheader(f"Risk statistics — `{working_book_name}`")
+    st.caption(
+        "All tables reflect the **Working book** selected in the sidebar."
+    )
+    if strategy_returns.empty or strategy_returns.shape[1] == 0:
+        st.warning("No strategy returns available for this book.")
+    else:
+        stats = risk.compute_risk_stats(strategy_returns)
+        st.dataframe(
+            stats.style.format({
+                "Ann.Return": "{:+.2%}",
+                "Ann.Vol": "{:.2%}",
+                "Sharpe": "{:.2f}",
+                "Max.Drawdown": "{:.2%}",
+            }),
+            use_container_width=True,
+        )
+
+        st.subheader("Correlation matrix — Strategies and TAA")
+        st.plotly_chart(
+            plotting.plot_correlation(strategy_returns.corr(),
+                                      title=f"Correlation Matrix — Strategies and TAA ({working_book_name})"),
+            use_container_width=True,
+        )
+
+        st.subheader("Approximate contribution to TAA risk")
+        rc = risk.compute_risk_contrib(strategy_returns, total_col=TOTAL_COLUMN_NAME)
+        if rc.empty:
+            st.info("Not enough data to decompose TAA volatility.")
+        else:
+            st.dataframe(
+                rc.style.format({
+                    "MarginalContribution": "{:.4f}",
+                    "ContribPct": "{:.2f}%",
+                }),
+                use_container_width=True,
+            )
+
+        st.subheader(f"Exposure matrix — Strategy x Asset ({working_book_name})")
+        if len(working_book) > 0:
+            expo = working_book.pivot_table(
+                index="Strategy", columns="RIC Name",
+                values="Size", aggfunc="sum", fill_value=0.0,
+            )
+            expo["TotalNet"] = expo.sum(axis=1)
+            st.dataframe(expo.style.format("{:+.4f}"), use_container_width=True)
+            fig_expo = plotting.plot_exposure_heatmap(
+                expo.drop(columns="TotalNet"),
+                title="Exposure heatmap (blue = short, red = long)",
+            )
+            if fig_expo is not None:
+                st.plotly_chart(fig_expo, use_container_width=True)
+
+
+# --------------------------------------------------------------------------
+# 7. Book comparison
+# --------------------------------------------------------------------------
+with tabs[6]:
     st.subheader("Book comparison")
     st.caption(
         "Pick a baseline (default `Current`) and one or more candidate "
@@ -654,7 +784,6 @@ with tabs[4]:
         for name in candidates:
             with st.expander(f"Position diff · {name} vs {base_name}", expanded=False):
                 pos = books.position_level_delta(baseline, library[name])
-                # Hide trivially-unchanged rows by default.
                 only_changed = st.checkbox(
                     "Show only changed rows", value=True, key=f"only_changed::{name}",
                 )
@@ -681,96 +810,6 @@ with tabs[4]:
                 plotting.plot_cumulative(cum, "Book comparison — Cumulative TAA"),
                 use_container_width=True,
             )
-
-
-# --------------------------------------------------------------------------
-# Run portfolio engine on the live book (drives Performance/Risk tabs).
-# This keeps the existing trade logic intact: trades_open → live book →
-# portfolio engine via book_to_trades_frame.
-# --------------------------------------------------------------------------
-strategy_returns, missing_assets = portfolio.build_strategy_returns(
-    asset_returns, books.book_to_trades_frame(current_book),
-)
-
-
-# --------------------------------------------------------------------------
-# 6. Performance
-# --------------------------------------------------------------------------
-with tabs[5]:
-    st.subheader("Historical performance — `Current` book")
-    st.caption(
-        "Returns of today's open book, held at constant exposure through "
-        "the full market-data history. Risk / exposure view, not "
-        "realised P&L."
-    )
-    if strategy_returns.empty or strategy_returns.shape[1] == 0:
-        st.warning("No strategy return series to plot.")
-    else:
-        cum = risk.compute_cumulative(strategy_returns)
-        st.plotly_chart(
-            plotting.plot_cumulative(cum, "Strategies + TAA — Cumulative Performance"),
-            use_container_width=True,
-        )
-        dd = risk.compute_drawdowns(strategy_returns)
-        st.plotly_chart(
-            plotting.plot_drawdowns(dd, "Strategies + TAA — Drawdowns"),
-            use_container_width=True,
-        )
-
-
-# --------------------------------------------------------------------------
-# 7. Risk
-# --------------------------------------------------------------------------
-with tabs[6]:
-    st.subheader("Risk statistics — `Current` book")
-    if strategy_returns.empty or strategy_returns.shape[1] == 0:
-        st.warning("No strategy returns available.")
-    else:
-        stats = risk.compute_risk_stats(strategy_returns)
-        st.dataframe(
-            stats.style.format({
-                "Ann.Return": "{:+.2%}",
-                "Ann.Vol": "{:.2%}",
-                "Sharpe": "{:.2f}",
-                "Max.Drawdown": "{:.2%}",
-            }),
-            use_container_width=True,
-        )
-
-        st.subheader("Correlation matrix — Strategies and TAA")
-        st.plotly_chart(
-            plotting.plot_correlation(strategy_returns.corr(),
-                                      title="Correlation Matrix — Strategies and TAA"),
-            use_container_width=True,
-        )
-
-        st.subheader("Approximate contribution to TAA risk")
-        rc = risk.compute_risk_contrib(strategy_returns, total_col=TOTAL_COLUMN_NAME)
-        if rc.empty:
-            st.info("Not enough data to decompose TAA volatility.")
-        else:
-            st.dataframe(
-                rc.style.format({
-                    "MarginalContribution": "{:.4f}",
-                    "ContribPct": "{:.2f}%",
-                }),
-                use_container_width=True,
-            )
-
-        st.subheader("Exposure matrix — Strategy x Asset (live book)")
-        if len(current_book) > 0:
-            expo = current_book.pivot_table(
-                index="Strategy", columns="RIC Name",
-                values="Size", aggfunc="sum", fill_value=0.0,
-            )
-            expo["TotalNet"] = expo.sum(axis=1)
-            st.dataframe(expo.style.format("{:+.4f}"), use_container_width=True)
-            fig_expo = plotting.plot_exposure_heatmap(
-                expo.drop(columns="TotalNet"),
-                title="Exposure heatmap (blue = short, red = long)",
-            )
-            if fig_expo is not None:
-                st.plotly_chart(fig_expo, use_container_width=True)
 
 
 # --------------------------------------------------------------------------
