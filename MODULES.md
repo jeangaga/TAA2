@@ -328,15 +328,29 @@ tab on every rerun because `_refresh_library` rebuilds
 
 1. **Raw Trades (audit)** — filtered open-trade rows, read-only.
 2. **Live Book** — read-only display of the aggregated `Current` book.
-3. **Books Library** — table of every book in the library; generators
-   for scaled / equal-vol / selected-strategy-scaled books; an
-   inspector; a remover for imported / generated / snapshot books.
-4. **Editable Scenario** — `st.data_editor` over the scenario book
-   with `num_rows="dynamic"`, a Strategy combobox sourced from
-   existing + scenario strategies, and a snapshot saver. The seed
-   flow is a **Seed from** dropdown that lists every book in the
-   library (Live `Current`, imported, generated, snapshot) plus a
-   **Seed** button — copying any of them into the scenario layer.
+3. **Books Library** — pure manager. Three sections: **Available
+   books** (table with Lines / Strategies / Gross / Net), **Inspect a
+   book** (per-book row view + an **Open in Editable Scenario** button
+   that seeds the scenario layer), and **Remove a book** (imported /
+   generated / snapshot only — `Current` and `Scenario (editable)` are
+   protected). No book construction lives here.
+4. **Editable Scenario** — the real construction workspace. Built in
+   four sections:
+   * **Seed from** dropdown + **Seed** / **Clear scenario** buttons
+     — copy any book in the library into the scenario layer.
+   * **Editor** — `st.data_editor` over the scenario book with
+     `num_rows="dynamic"` and a Strategy combobox sourced from
+     existing + scenario strategies.
+   * **Transform scenario** — sub-tabs for *Scale whole book*,
+     *Scale selected strategies*, *Equal-vol by strategy*. Each
+     applies in-place to `st.session_state.scenario_book` and clears
+     the editor's diff state (`st.session_state.pop("scenario_editor")`)
+     so the editor re-renders cleanly with the transformed values.
+   * **Save & export** — snapshot saver (in-session), a table of
+     existing snapshots, and a **Download newBOOKS.csv** button that
+     serialises every snapshot (and optionally the current scenario)
+     via `books.book_to_books_csv`. The caption explicitly distinguishes
+     in-session state from on-disk state.
 5. **Performance** — cumulative + drawdown chart for the **Working
    book**, via `book_to_trades_frame` +
    `portfolio.build_strategy_returns`. Includes an in-tab working-book

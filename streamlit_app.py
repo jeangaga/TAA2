@@ -27,9 +27,17 @@ the user can compare:
   * ``Current`` (always sourced from ``Trades.csv``)
   * Scenario book (the editable one)
   * Books imported from ``Books.csv``
-  * Generated books (whole-book scaled, equal-vol-by-strategy,
-    selected-strategy scaled)
   * Saved snapshots (frozen copies the user explicitly stored)
+  * (Legacy) Generated books — still displayed if present in session,
+    but new construction lives in the Editable Scenario tab.
+
+UX split
+--------
+  * **Books Library** is a pure manager: browse, inspect, remove,
+    "Open in Editable Scenario".
+  * **Editable Scenario** is the construction workspace: seed from any
+    book, manually edit, apply transforms (scale / scale-selected /
+    equal-vol), save snapshots, export to ``newBOOKS.csv``.
 
 Run locally:
     pip install -r requirements.txt
@@ -522,6 +530,109 @@ with tabs[3]:
         edited = edited.reindex(columns=books.BOOK_COLUMNS)
         st.session_state.scenario_book = edited
 
+        # ------------------------------------------------------------
+        # Transform scenario — apply a generator to the current scenario
+        # in place. The data editor's diff state is cleared so the new
+        # values render cleanly on the next rerun.
+        # ------------------------------------------------------------
+        st.divider()
+        st.markdown("### Transform scenario")
+        st.caption(
+            "Apply a generator to the current scenario. The transformation "
+            "rewrites the editable book in place — your manual edits stay, "
+            "scaled or rebalanced. To compare a transformed scenario "
+            "against the original, save a snapshot first."
+        )
+
+        tx_tabs = st.tabs([
+            "Scale whole book",
+            "Scale selected strategies",
+            "Equal-vol by strategy",
+        ])
+
+        with tx_tabs[0]:
+            st.caption(
+                "Multiply every position's `Size` by the same factor. "
+                "Cheapest way to dial whole-book risk up or down."
+            )
+            sw_col1, sw_col2 = st.columns([3, 1])
+            sw_factor = sw_col1.slider(
+                "Scale factor", 0.0, 5.0, 1.0, 0.05, key="tx_scale_whole_factor",
+            )
+            if sw_col2.button("Apply", key="tx_scale_whole_btn", use_container_width=True):
+                st.session_state.scenario_book = books.scale_whole_book(
+                    st.session_state.scenario_book, sw_factor, new_name="Scenario",
+                )
+                st.session_state.pop("scenario_editor", None)
+                st.toast(f"Whole scenario scaled by {sw_factor:.2f}x.")
+                st.rerun()
+
+        with tx_tabs[1]:
+            st.caption(
+                "Scale only the selected strategies; leave the rest of the "
+                "scenario untouched."
+            )
+            sel_strats_avail = sorted(
+                st.session_state.scenario_book["Strategy"].dropna().unique().tolist()
+            )
+            sel_picked = st.multiselect(
+                "Strategies to scale",
+                sel_strats_avail,
+                default=sel_strats_avail[:1],
+                key="tx_scale_sel_picked",
+            )
+            ss_col1, ss_col2 = st.columns([3, 1])
+            ss_factor = ss_col1.slider(
+                "Scale factor", 0.0, 5.0, 1.0, 0.05, key="tx_scale_sel_factor",
+            )
+            if ss_col2.button(
+                "Apply", key="tx_scale_sel_btn",
+                disabled=not sel_picked, use_container_width=True,
+            ):
+                st.session_state.scenario_book = books.scale_selected_strategies(
+                    st.session_state.scenario_book, sel_picked, ss_factor,
+                    new_name="Scenario",
+                )
+                st.session_state.pop("scenario_editor", None)
+                st.toast(
+                    f"Scaled {len(sel_picked)} strategy(ies) by {ss_factor:.2f}x."
+                )
+                st.rerun()
+
+        with tx_tabs[2]:
+            st.caption(
+                "Rebalance each strategy so it contributes the same ex-ante "
+                "vol. Target = 0 keeps the current average sleeve vol."
+            )
+            ev_col1, ev_col2 = st.columns([3, 1])
+            ev_target_pct = ev_col1.slider(
+                "Target sleeve vol (annualised, %; 0 = current average)",
+                0.0, 25.0, 0.0, 0.25, key="tx_evol_target",
+            )
+            if ev_col2.button("Apply", key="tx_evol_btn", use_container_width=True):
+                from core.config import ANN_FACTOR
+                import numpy as _np
+                target = (ev_target_pct / 100.0) / _np.sqrt(ANN_FACTOR) if ev_target_pct > 0 else None
+                st.session_state.scenario_book = books.equal_vol_book(
+                    st.session_state.scenario_book, asset_returns,
+                    target_vol=target, new_name="Scenario",
+                )
+                st.session_state.pop("scenario_editor", None)
+                st.toast("Equal-vol rebalance applied to scenario.")
+                st.rerun()
+
+        # ------------------------------------------------------------
+        # Save & export — snapshots stay in session; the export button
+        # writes them to a downloadable Books.csv on the user's machine.
+        # ------------------------------------------------------------
+        st.divider()
+        st.markdown("### Save & export")
+        st.caption(
+            "Snapshots are kept **in session** — they live until the page "
+            "is reloaded. Use **Export to newBOOKS.csv** to persist them "
+            "as a real file you can re-import next time."
+        )
+
         st.markdown("**Save scenario as snapshot**")
         snap_col1, snap_col2 = st.columns([3, 1])
         snap_name = snap_col1.text_input(
@@ -529,27 +640,87 @@ with tabs[3]:
             label_visibility="collapsed",
         )
         if snap_col2.button("Save snapshot", disabled=not snap_name.strip()):
-            snapshot = edited.copy()
+            snapshot = st.session_state.scenario_book.copy()
             snapshot["BookName"] = snap_name.strip()
             st.session_state.snapshots[snap_name.strip()] = snapshot
             st.success(f"Saved snapshot **{snap_name.strip()}**.")
             st.rerun()
+
+        if st.session_state.snapshots:
+            st.markdown("**Saved snapshots (in session)**")
+            snap_rows = []
+            for name, b in st.session_state.snapshots.items():
+                size = pd.to_numeric(b["Size"], errors="coerce").dropna() if len(b) else pd.Series(dtype=float)
+                snap_rows.append({
+                    "Snapshot": name,
+                    "Lines": len(b),
+                    "Strategies": int(b["Strategy"].nunique()) if len(b) else 0,
+                    "Gross": float(size.abs().sum()),
+                    "Net": float(size.sum()),
+                })
+            st.dataframe(
+                pd.DataFrame(snap_rows).style.format(
+                    {"Gross": "{:+.4f}", "Net": "{:+.4f}"}, na_rep=""
+                ),
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info("No snapshots saved yet.")
+
+        st.markdown("**Export to newBOOKS.csv**")
+        exp_col1, exp_col2, exp_col3 = st.columns([2, 2, 2])
+        include_current = exp_col1.checkbox(
+            "Include current scenario",
+            value=False,
+            help="Add the in-progress scenario book to the export under the name below.",
+            key="export_include_current",
+        )
+        export_scn_name = exp_col2.text_input(
+            "Scenario name in export",
+            value="Scenario draft",
+            disabled=not include_current,
+            key="export_scenario_name",
+        )
+        export_map = dict(st.session_state.snapshots)
+        if include_current and export_scn_name.strip():
+            scn = st.session_state.scenario_book.copy()
+            scn["BookName"] = export_scn_name.strip()
+            export_map[export_scn_name.strip()] = scn
+        payload = books.book_to_books_csv(export_map) if export_map else b""
+        exp_col3.download_button(
+            "Export to newBOOKS.csv",
+            data=payload,
+            file_name="newBOOKS.csv",
+            mime="text/csv",
+            disabled=not export_map,
+            help=(
+                "Download every saved snapshot (and optionally the current "
+                "scenario) as a Books.csv-compatible file."
+            ),
+            use_container_width=True,
+        )
 
 # Re-refresh library after potential scenario edits / snapshots.
 library = _refresh_library(current_book)
 
 
 # --------------------------------------------------------------------------
-# 3. Books library — list, generate, manage
+# 3. Books library — browse / inspect / remove. Pure manager.
+# All book construction (manual edits + transforms + export) lives in
+# the Editable Scenario tab, which is the real construction workspace.
 # --------------------------------------------------------------------------
 with tabs[2]:
     st.subheader("Books library")
     st.caption(
-        "All books available for comparison. `Current` is sourced from "
-        "`Trades.csv`. Imported books come from `Books.csv`. Generated "
-        "and snapshot books live in session."
+        "Catalogue of every book available to the app. `Current` is "
+        "sourced from `Trades.csv`. Imported books come from `Books.csv`. "
+        "Snapshots are scenarios the user has saved in-session from the "
+        "**Editable Scenario** tab. This tab is for browsing and "
+        "management only — to build or transform a book, go to "
+        "**Editable Scenario**."
     )
 
+    st.markdown("### Available books")
     rows = []
     for name, b in library.items():
         size = pd.to_numeric(b["Size"], errors="coerce").dropna() if len(b) else pd.Series(dtype=float)
@@ -568,65 +739,6 @@ with tabs[2]:
     )
 
     st.divider()
-    st.markdown("### Generate a new book")
-    gen_kind = st.selectbox(
-        "Generator",
-        [
-            "Scaled whole book",
-            "Equal-vol by strategy",
-            "Selected-strategy scaled",
-        ],
-        key="gen_kind",
-    )
-    src_book_name = st.selectbox(
-        "Source book",
-        list(library.keys()),
-        index=0,
-        key="gen_source",
-    )
-    src_book = library[src_book_name]
-
-    new_name = st.text_input(
-        "New book name", value=f"{gen_kind} of {src_book_name}",
-        key="gen_new_name",
-    )
-
-    if gen_kind == "Scaled whole book":
-        factor = st.slider("Scale factor", 0.0, 5.0, 1.0, 0.05, key="gen_factor")
-        if st.button("Generate", key="gen_btn_scale"):
-            st.session_state.generated_books[new_name] = books.scale_whole_book(
-                src_book, factor, new_name=new_name,
-            )
-            st.success(f"Generated **{new_name}**.")
-            st.rerun()
-
-    elif gen_kind == "Equal-vol by strategy":
-        target_pct = st.slider(
-            "Target sleeve vol (annualised, %; 0 = use current average)",
-            0.0, 25.0, 0.0, 0.25, key="gen_target_vol",
-        )
-        if st.button("Generate", key="gen_btn_evol"):
-            from core.config import ANN_FACTOR
-            import numpy as _np
-            target = (target_pct / 100.0) / _np.sqrt(ANN_FACTOR) if target_pct > 0 else None
-            st.session_state.generated_books[new_name] = books.equal_vol_book(
-                src_book, asset_returns, target_vol=target, new_name=new_name,
-            )
-            st.success(f"Generated **{new_name}**.")
-            st.rerun()
-
-    elif gen_kind == "Selected-strategy scaled":
-        strats = sorted(src_book["Strategy"].dropna().unique().tolist())
-        picked = st.multiselect("Strategies to scale", strats, default=strats[:1], key="gen_picked")
-        factor = st.slider("Scale factor", 0.0, 5.0, 1.0, 0.05, key="gen_factor_sel")
-        if st.button("Generate", key="gen_btn_sel") and picked:
-            st.session_state.generated_books[new_name] = books.scale_selected_strategies(
-                src_book, picked, factor, new_name=new_name,
-            )
-            st.success(f"Generated **{new_name}**.")
-            st.rerun()
-
-    st.divider()
     st.markdown("### Inspect a book")
     insp_name = st.selectbox(
         "Pick a book to view", list(library.keys()), key="insp_name",
@@ -643,9 +755,30 @@ with tabs[2]:
             insp_view.style.format({"Size": "{:+.4f}"}, na_rep=""),
             use_container_width=True, hide_index=True,
         )
+        # Quick jump into the construction workspace, pre-seeded with this book.
+        jump_col, _ = st.columns([1, 3])
+        if jump_col.button(
+            "Open in Editable Scenario",
+            key="insp_open_in_scenario",
+            disabled=insp_name == "Scenario (editable)",
+            help="Copy this book into the scenario layer, ready to edit and transform.",
+        ):
+            src = insp_book.copy()
+            src["BookName"] = "Scenario"
+            st.session_state.scenario_book = src.reindex(columns=books.BOOK_COLUMNS)
+            # Reset the editor's internal diff state so it shows the new
+            # seed cleanly instead of stacking old edits on top. We do NOT
+            # touch `scenario_seed_source` here because that key is bound
+            # to the Editable Scenario tab's seed selectbox, which has
+            # already been instantiated this run — Streamlit would raise
+            # if we wrote to it. The scenario book itself is what matters.
+            st.session_state.pop("scenario_editor", None)
+            st.toast(f"Seeded scenario from **{insp_name}**. Switch to Editable Scenario to continue.")
+            st.rerun()
 
     st.divider()
     st.markdown("### Remove a book")
+    st.caption("`Current` and `Scenario (editable)` cannot be removed from here.")
     removable = (
         list(st.session_state.imported_books.keys())
         + list(st.session_state.generated_books.keys())
