@@ -234,6 +234,89 @@ def book_to_books_csv(books: Dict[str, pd.DataFrame]) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Canonicalisation — normalise a draft frame back to a valid book
+# ---------------------------------------------------------------------------
+def canonicalize_book(
+    book: pd.DataFrame,
+    book_name: str = "",
+) -> pd.DataFrame:
+    """Normalise a draft frame back into canonical book form.
+
+    Canonical book invariant
+    ------------------------
+    One row per ``Strategy x RIC x RIC Name``. No blank keys, no NaN /
+    zero Size. ``TradeCount`` and ``GrossUnderlyingSize`` are recomputed
+    from the (possibly duplicated) draft rows, ``EntryDate`` is the
+    earliest non-null, ``ExitDate`` the latest, ``AssetClass`` and
+    ``Comment`` are carried forward from the first non-empty draft row.
+
+    Call this after any user mutation (editor commit, add-row,
+    remove-strategy, transform, seed) so the book object stays loadable
+    by the engine and safe to export.
+    """
+    if book is None or len(book) == 0:
+        return _empty_book(book_name)
+
+    df = book.copy()
+
+    for col in ("Strategy", "RIC", "RIC Name", "AssetClass", "Comment"):
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).fillna("").str.strip()
+
+    for col in ("EntryDate", "ExitDate"):
+        if col not in df.columns:
+            df[col] = pd.NaT
+        else:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    if "Size" not in df.columns:
+        df["Size"] = np.nan
+    df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
+
+    # Reject malformed rows so the engine never sees them.
+    valid = (
+        ~df["Strategy"].isin(MISSING_STRATEGY_TOKENS)
+        & ~df["RIC Name"].isin(MISSING_STRATEGY_TOKENS)
+        & df["Size"].notna()
+        & (df["Size"] != 0)
+    )
+    df = df[valid].copy()
+    if df.empty:
+        return _empty_book(book_name)
+
+    def _first_non_empty(series: pd.Series) -> str:
+        for v in series.astype(str):
+            v = v.strip()
+            if v and v.lower() != "nan":
+                return v
+        return ""
+
+    keys = ["Strategy", "RIC", "RIC Name"]
+    agg = (
+        df.groupby(keys, dropna=False)
+        .agg(
+            Size=("Size", "sum"),
+            TradeCount=("Size", "count"),
+            GrossUnderlyingSize=("Size", lambda s: float(np.abs(s).sum())),
+            EntryDate=("EntryDate", "min"),
+            ExitDate=("ExitDate", "max"),
+            AssetClass=("AssetClass", _first_non_empty),
+            Comment=("Comment", _first_non_empty),
+        )
+        .reset_index()
+    )
+
+    # A second-pass reject: Size can sum to zero if long/short legs cancel.
+    agg = agg[agg["Size"] != 0].copy()
+    if agg.empty:
+        return _empty_book(book_name)
+
+    agg["BookName"] = book_name
+    return agg.reindex(columns=BOOK_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
 # Book → trades adapter (for the existing portfolio engine)
 # ---------------------------------------------------------------------------
 def book_to_trades_frame(book: pd.DataFrame) -> pd.DataFrame:
