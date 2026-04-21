@@ -187,6 +187,15 @@ shape the portfolio engine ultimately consumes.
   `GrossUnderlyingSize` are preserved as diagnostics. Drops rows with
   missing strategy / RIC / zero size.
 
+- **`canonicalize_book(book, book_name="") → DataFrame`** — Normalises
+  any draft frame (editor commit, add-row, pruning, transform output)
+  back into canonical book form: one row per `Strategy x RIC x RIC Name`,
+  no blank keys, no NaN / zero Size, diagnostics (`TradeCount`,
+  `GrossUnderlyingSize`) recomputed from the draft. `EntryDate` is the
+  earliest non-null, `ExitDate` the latest; `AssetClass` and `Comment`
+  carry forward from the first non-empty draft row. Called after every
+  scenario mutation so the book invariant always holds.
+
 - **`load_books_csv(file_bytes) → {name: DataFrame}`** — Loads a
   `Books.csv` library, splits by `BookName`, and returns each as a
   fully-conformed book frame. Dates parse as ISO `YYYY-MM-DD` (other
@@ -296,8 +305,12 @@ and always win over the GitHub copy (resolved by the `_bytes_for`
 helper), so the user can override individual files after a pull.
 `Books.csv` upload is gated behind an explicit **Import Books.csv**
 button so re-uploading without clicking import does not clobber the
-library. As-of-date picker and a strategy filter scope the official
-`Current` book.
+library. Both the GitHub auto-import and the manual import surface an
+explicit warning when an incoming `BookName` overwrites an existing
+imported book. The as-of-date picker is the only global scope — the
+old global strategy-filter was removed because it only filtered
+`Current` / `Trades.csv` and was misleading once the app became
+multi-book. Strategy scoping now lives in the Editable Scenario tab.
 
 **Working book** — one canonical session value
 (`st.session_state["working_book_name"]`, NOT bound to any widget)
@@ -328,29 +341,52 @@ tab on every rerun because `_refresh_library` rebuilds
 
 1. **Raw Trades (audit)** — filtered open-trade rows, read-only.
 2. **Live Book** — read-only display of the aggregated `Current` book.
-3. **Books Library** — pure manager. Three sections: **Available
+3. **Books Library** — pure manager. Four sections: **Available
    books** (table with Lines / Strategies / Gross / Net), **Inspect a
    book** (per-book row view + an **Open in Editable Scenario** button
-   that seeds the scenario layer), and **Remove a book** (imported /
-   generated / snapshot only — `Current` and `Scenario (editable)` are
-   protected). No book construction lives here.
-4. **Editable Scenario** — the real construction workspace. Built in
-   four sections:
-   * **Seed from** dropdown + **Seed** / **Clear scenario** buttons
-     — copy any book in the library into the scenario layer.
-   * **Editor** — `st.data_editor` over the scenario book with
-     `num_rows="dynamic"` and a Strategy combobox sourced from
-     existing + scenario strategies.
-   * **Transform scenario** — sub-tabs for *Scale whole book*,
-     *Scale selected strategies*, *Equal-vol by strategy*. Each
-     applies in-place to `st.session_state.scenario_book` and clears
-     the editor's diff state (`st.session_state.pop("scenario_editor")`)
-     so the editor re-renders cleanly with the transformed values.
-   * **Save & export** — snapshot saver (in-session), a table of
-     existing snapshots, and a **Download newBOOKS.csv** button that
-     serialises every snapshot (and optionally the current scenario)
-     via `books.book_to_books_csv`. The caption explicitly distinguishes
-     in-session state from on-disk state.
+   that seeds the scenario layer *and* switches the working book to
+   `Scenario (editable)` so Performance/Risk immediately reflect it),
+   **Export to `newBOOKS.csv`** (snapshots + optional current scenario,
+   serialised via `books.book_to_books_csv`), and **Remove a book**.
+   Removal uses provenance-prefixed keys (`Imported · X`, `Generated ·
+   X`, `Snapshot · X`) so the same raw name across two stores is
+   distinguishable and removal hits exactly one store — the previous
+   raw-name approach silently removed from every store. `Current` and
+   `Scenario (editable)` are protected. No book construction lives here.
+4. **Editable Scenario** — the real construction workspace. Every
+   mutation runs through `books.canonicalize_book`, so the invariant
+   (one row per `Strategy x RIC x RIC Name`, no blanks, no zero Size,
+   fresh diagnostics) always holds. Built in five sections:
+   * **Seed** — dropdown + **Seed** / **Clear scenario** buttons. Seed
+     copies any library book into the scenario layer, canonicalises it,
+     and sets `working_book_name = "Scenario (editable)"` so the rest
+     of the app points at the scenario immediately. Clear wipes the
+     scenario and, if the working book was pointed at it, resets the
+     working book to `Current`.
+   * **Scenario strategy scope** — two controls: a keep-list of the
+     scenario's own strategies (with an explicit **Apply scope** button
+     to prune rows), and a universe of strategies drawn from every book
+     in the library, used to populate the Add Position form's selectbox.
+   * **Edit existing rows** — `st.data_editor` with `num_rows="fixed"`
+     (adding rows is handled by the form). RIC Name is a searchable
+     selectbox of `asset_returns.columns` so typos are limited. The
+     editor's output is canonicalised before being stored so blanks /
+     zero Sizes / duplicate keys are normalised immediately.
+   * **Add position** — a dedicated `st.form` that's the reliable way
+     to create new rows (grid-based row addition with `SelectboxColumn`
+     doesn't handle unseen labels well). Supports: existing-Strategy
+     selectbox with a new-label text override, RIC Name selectbox from
+     `asset_returns.columns` with a custom-text override (warns on
+     unmatched names), plus Size / dates / Comment. Matching keys
+     merge into existing rows via canonicalisation.
+   * **Transform scenario** — sub-tabs for *Scale whole book*, *Scale
+     selected strategies*, *Equal-vol by strategy* (caption now
+     clarifies this equalises standalone sleeve vol, not risk
+     contribution). Each applies the generator and canonicalises the
+     result.
+   * **Save snapshot** — names the current scenario and stores it in
+     `st.session_state.snapshots` (with an overwrite warning). Export
+     to disk is handled in the Books Library tab, not here.
 5. **Performance** — cumulative + drawdown chart for the **Working
    book**, via `book_to_trades_frame` +
    `portfolio.build_strategy_returns`. Includes an in-tab working-book
