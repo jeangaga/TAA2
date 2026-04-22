@@ -482,6 +482,37 @@ with tabs[3]:
         "Performance / Risk reflect it immediately."
     )
 
+    # ---- Active-working-book indicator --------------------------------
+    # Catches the most common cause of "my edits don't show up in
+    # Performance / Risk": working_book_name is still pointing at the
+    # seed source (e.g. "Imported · Book 1") instead of the scenario.
+    # The Performance / Risk tabs read whichever book the working
+    # selector is on — if it's the imported book, edits done here have
+    # no visible effect there. Surface this state inline + offer a
+    # one-click switch so the user never has to guess.
+    _wb_now = st.session_state.get("working_book_name", "Current")
+    if st.session_state.scenario_book is not None and _wb_now != "Scenario (editable)":
+        warn_col, fix_col = st.columns([4, 1])
+        warn_col.warning(
+            f"Working book is **{_wb_now}** — Performance / Risk are "
+            "computing against that book, not the scenario you're "
+            "editing. Switch to **Scenario (editable)** to see your "
+            "edits propagate."
+        )
+        if fix_col.button(
+            "Use scenario",
+            key="scn_use_as_working",
+            help="Set the working book to Scenario (editable). Performance / Risk will refresh on the next interaction.",
+            use_container_width=True,
+        ):
+            _set_scenario_as_working()
+            st.rerun()
+    elif st.session_state.scenario_book is not None:
+        st.success(
+            "Working book is **Scenario (editable)** — Performance / "
+            "Risk reflect the latest edits below."
+        )
+
     # ---- Seed / Clear --------------------------------------------------
     seed_options = [n for n in library.keys() if n != "Scenario (editable)"]
     seed_default = "Current" if "Current" in seed_options else (seed_options[0] if seed_options else None)
