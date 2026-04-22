@@ -130,6 +130,17 @@ if "snapshots" not in st.session_state:
 if "scenario_book" not in st.session_state:
     st.session_state.scenario_book: pd.DataFrame | None = None
 
+# Strategy registry — session-scoped persistent set of strategy labels.
+# Rationale: a strategy can disappear from a *book* (when rows are
+# pruned) without disappearing from the *universe of known labels*.
+# The registry carries those labels forward so the user can re-add a
+# pruned strategy without having to retype it. It is seeded from every
+# book's Strategy column on each rerun and augmented with labels the
+# user types into the Add Position form. Case / whitespace sensitive
+# so intentional near-duplicates are preserved.
+if "strategy_registry" not in st.session_state:
+    st.session_state.strategy_registry: set[str] = set()
+
 
 def _refresh_library(current_book: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Recompose the library dict from session state."""
@@ -144,6 +155,27 @@ def _refresh_library(current_book: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         lib[f"Snapshot · {name}"] = b
     st.session_state.library = lib
     return lib
+
+
+def _refresh_strategy_registry(library: Dict[str, pd.DataFrame]) -> list[str]:
+    """Rebuild the registry as: union of every book's labels ∪ any
+    previously-registered labels the user has typed manually.
+
+    Monotonically growing within a session — pruning a scenario never
+    removes a label, because the registry's job is to be the stable
+    universe of names the Add Position form and editor grid draw from.
+    Returns a sorted list for direct use in selectbox options.
+    """
+    labels: set[str] = set(st.session_state.strategy_registry)
+    for book_df in library.values():
+        if book_df is None or len(book_df) == 0 or "Strategy" not in book_df.columns:
+            continue
+        for s in book_df["Strategy"].dropna().astype(str):
+            s = s.strip()
+            if s:
+                labels.add(s)
+    st.session_state.strategy_registry = labels
+    return sorted(labels)
 
 
 # --------------------------------------------------------------------------
@@ -318,6 +350,11 @@ trades_open = trades.open_as_of_date(trades_clean, as_of_ts)
 # --------------------------------------------------------------------------
 current_book = books.trades_to_live_book(trades_open, book_name="Current")
 library = _refresh_library(current_book)
+# Strategy registry tracks every label we've ever seen in any book in
+# this session. It is the universe the scenario's Add Position form and
+# editor grid draw from, so pruning a strategy from the scenario never
+# makes its label unpickable.
+strategy_registry_sorted = _refresh_strategy_registry(library)
 
 
 # --------------------------------------------------------------------------
@@ -568,9 +605,11 @@ with tabs[3]:
         # ----------------------------------------------------------------
         st.markdown("### Scenario strategy scope")
         st.caption(
-            "Prune strategies from the scenario, and pick the universe used "
-            "by the Add Position form. These controls are scoped to the "
-            "scenario only — no other book is affected."
+            "Prune strategies from the scenario — this only removes their "
+            "rows from the scenario. The strategy labels stay in the "
+            "session-wide **strategy registry** and remain pickable in "
+            "the Add Position form and the editor grid, so you can always "
+            "re-add a pruned strategy without retyping."
         )
 
         sb = st.session_state.scenario_book
@@ -597,13 +636,12 @@ with tabs[3]:
             st.toast(f"Pruned strategy(ies): {', '.join(removed) if removed else '—'}")
             st.rerun()
 
-        # Universe for the Add Position form.
-        universe_strats = sorted({
-            str(s).strip()
-            for book_df in library.values()
-            for s in (book_df["Strategy"].dropna().tolist() if len(book_df) else [])
-            if str(s).strip()
-        })
+        # Universe for the Add Position form AND the data-editor Strategy
+        # column. Sourced from `strategy_registry`, which is the union of
+        # every book's labels + any labels the user has manually typed.
+        # Sticky across pruning: a strategy removed from the scenario is
+        # still pickable because its label lives in the registry.
+        universe_strats = list(strategy_registry_sorted)
 
         # Re-pick `sb` in case the scope apply above mutated state.
         sb = st.session_state.scenario_book
@@ -611,9 +649,11 @@ with tabs[3]:
         # ---- Editable grid --------------------------------------------
         st.markdown("### Edit existing rows")
         st.caption(
-            "Grid for editing **existing** positions (Size, dates, comment, "
-            "RIC/RIC Name). Use the **Add position** form below to create "
-            "new rows — the grid is not reliable for unseen Strategy labels."
+            "Grid for editing **existing** positions — Size, dates, "
+            "comment, RIC / RIC Name, and Strategy (any label in the "
+            "registry, including previously-pruned ones). To add rows "
+            "or introduce a brand-new strategy label, use the Add "
+            "position form below."
         )
 
         edit_cols = ["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate", "Comment"]
@@ -625,8 +665,15 @@ with tabs[3]:
             column_config={
                 "Strategy": st.column_config.SelectboxColumn(
                     "Strategy",
-                    help="Pick an existing scenario strategy. To introduce a new strategy, use the Add position form below.",
-                    options=scenario_strats,
+                    help=(
+                        "Pick any label from the strategy registry "
+                        "(union of every book's strategies + anything "
+                        "you've typed). Pruned labels still show up "
+                        "here — the registry is sticky across pruning. "
+                        "To create a brand-new label, use the Add "
+                        "position form below."
+                    ),
+                    options=universe_strats,
                     required=False,
                 ),
                 "RIC": st.column_config.TextColumn("RIC"),
@@ -680,7 +727,12 @@ with tabs[3]:
                 "Strategy (existing)",
                 options=[""] + universe_strats,
                 index=0,
-                help="Pick a known strategy, or leave blank and type a new label on the right.",
+                help=(
+                    "Pick any label from the strategy registry (every "
+                    "label seen in any book this session, including "
+                    "ones you've pruned from the scenario). Leave blank "
+                    "and type on the right to create a brand-new label."
+                ),
                 key="add_strat_pick",
             )
             strat_new = ar_col2.text_input(
@@ -764,6 +816,12 @@ with tabs[3]:
                 st.session_state.scenario_book = books.canonicalize_book(
                     combined, book_name="Scenario",
                 )
+                # Register the label explicitly — the registry rebuild
+                # at the end of the script run will also pick it up from
+                # scenario_book, but writing it here makes the intent
+                # ("this label now exists in the universe") clear even
+                # if a future refactor moves the rebuild point.
+                st.session_state.strategy_registry.add(resolved_strat)
                 _reset_scenario_editor_state()
                 if resolved_ric_name not in asset_returns.columns:
                     st.warning(
@@ -873,34 +931,119 @@ with tabs[3]:
                 st.toast("Equal-vol rebalance applied to scenario.")
                 st.rerun()
 
-        # ---- Save snapshot --------------------------------------------
+        # ---- Save snapshot / Update existing book ----------------------
+        # Two persistence modes for the in-progress scenario:
+        #   * **New snapshot** — freeze a fresh in-session copy under a
+        #     new name (always lands in `snapshots`).
+        #   * **Update existing book** — overwrite any writable book in
+        #     its own store (imported / generated / snapshot). `Current`
+        #     is sourced from `Trades.csv` and is therefore immutable;
+        #     `Scenario (editable)` is the live working copy itself,
+        #     also excluded.
         st.divider()
-        st.markdown("### Save snapshot")
+        st.markdown("### Save / update")
         st.caption(
-            "Freeze the current scenario as a named snapshot (kept **in session**). "
-            "Persist snapshots to disk via **Export to newBOOKS.csv** in the "
-            "Books Library tab."
+            "Freeze the current scenario into the library — either as a "
+            "new in-session snapshot, or by overwriting an existing "
+            "imported / generated / snapshot book. `Current` is sourced "
+            "from `Trades.csv` and cannot be overwritten from here. "
+            "Persist anything to disk via **Export to newBOOKS.csv** in "
+            "the Books Library tab."
         )
 
-        snap_col1, snap_col2 = st.columns([3, 1])
-        snap_name = snap_col1.text_input(
-            "Snapshot name", value="", placeholder="e.g. Defensive tilt v1",
-            label_visibility="collapsed",
+        # Build the writable-book picker. Same provenance labelling as
+        # the Books Library remove block, so the UI is consistent.
+        writable_books = (
+            [("imported", n, f"Imported · {n}") for n in st.session_state.imported_books.keys()]
+            + [("generated", n, f"Generated · {n}") for n in st.session_state.generated_books.keys()]
+            + [("snapshot", n, f"Snapshot · {n}") for n in st.session_state.snapshots.keys()]
         )
-        if snap_col2.button("Save snapshot", disabled=not snap_name.strip()):
-            snapshot = books.canonicalize_book(
-                st.session_state.scenario_book, book_name=snap_name.strip(),
+        writable_labels = [lbl for _, _, lbl in writable_books]
+
+        save_mode = st.radio(
+            "Save target",
+            options=["New snapshot", "Update existing book"],
+            horizontal=True,
+            key="scn_save_mode",
+            help=(
+                "**New snapshot** creates a fresh in-session copy. "
+                "**Update existing book** overwrites the chosen "
+                "imported / generated / snapshot book in place."
+            ),
+        )
+
+        if save_mode == "New snapshot":
+            snap_col1, snap_col2 = st.columns([3, 1])
+            snap_name = snap_col1.text_input(
+                "Snapshot name",
+                value="",
+                placeholder="e.g. Defensive tilt v1",
+                label_visibility="collapsed",
+                key="scn_save_new_name",
             )
-            overwrote = snap_name.strip() in st.session_state.snapshots
-            st.session_state.snapshots[snap_name.strip()] = snapshot
-            if overwrote:
-                st.warning(f"Overwrote existing snapshot **{snap_name.strip()}**.")
+            if snap_col2.button(
+                "Save snapshot",
+                disabled=not snap_name.strip(),
+                key="scn_save_new_btn",
+            ):
+                snapshot = books.canonicalize_book(
+                    st.session_state.scenario_book, book_name=snap_name.strip(),
+                )
+                overwrote = snap_name.strip() in st.session_state.snapshots
+                st.session_state.snapshots[snap_name.strip()] = snapshot
+                if overwrote:
+                    st.warning(f"Overwrote existing snapshot **{snap_name.strip()}**.")
+                else:
+                    st.success(f"Saved snapshot **{snap_name.strip()}**.")
+                st.rerun()
+        else:
+            if not writable_labels:
+                st.info(
+                    "No writable books to update — import a `Books.csv`, "
+                    "generate a transform, or save a snapshot first."
+                )
             else:
-                st.success(f"Saved snapshot **{snap_name.strip()}**.")
-            st.rerun()
+                upd_col1, upd_col2 = st.columns([3, 1])
+                upd_label = upd_col1.selectbox(
+                    "Existing book to overwrite",
+                    options=writable_labels,
+                    key="scn_save_existing_label",
+                    help=(
+                        "Pick the book to replace. The scenario will be "
+                        "canonicalised and written into the matching store "
+                        "under the same raw name."
+                    ),
+                )
+                if upd_col2.button(
+                    "Update book",
+                    disabled=not upd_label,
+                    key="scn_save_existing_btn",
+                ):
+                    target = next(
+                        ((store, raw) for store, raw, lbl in writable_books if lbl == upd_label),
+                        None,
+                    )
+                    if target is None:
+                        st.error(f"Could not resolve '{upd_label}'.")
+                    else:
+                        store, raw = target
+                        canonical = books.canonicalize_book(
+                            st.session_state.scenario_book, book_name=raw,
+                        )
+                        stores = {
+                            "imported": st.session_state.imported_books,
+                            "generated": st.session_state.generated_books,
+                            "snapshot": st.session_state.snapshots,
+                        }
+                        stores[store][raw] = canonical
+                        st.success(f"Updated **{upd_label}** with the current scenario.")
+                        st.rerun()
 
-# Re-refresh library after potential scenario edits / snapshots.
+# Re-refresh library + strategy registry after potential scenario
+# edits / snapshots / Add Position / Apply scope. The registry is
+# monotonic per session — pruned labels stay pickable.
 library = _refresh_library(current_book)
+strategy_registry_sorted = _refresh_strategy_registry(library)
 
 
 # --------------------------------------------------------------------------
