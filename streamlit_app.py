@@ -53,6 +53,7 @@ from __future__ import annotations
 import urllib.request
 from typing import Dict, Optional
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -1194,9 +1195,7 @@ with tabs[3]:
                 0.0, 25.0, 0.0, 0.25, key="tx_evol_target",
             )
             if ev_col2.button("Apply", key="tx_evol_btn", use_container_width=True):
-                from core.config import ANN_FACTOR
-                import numpy as _np
-                target = (ev_target_pct / 100.0) / _np.sqrt(ANN_FACTOR) if ev_target_pct > 0 else None
+                target = (ev_target_pct / 100.0) / np.sqrt(ANN_FACTOR) if ev_target_pct > 0 else None
                 rebalanced = books.equal_vol_book(
                     st.session_state.scenario_book, asset_returns,
                     target_vol=target, new_name="Scenario",
