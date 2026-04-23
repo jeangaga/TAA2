@@ -57,7 +57,7 @@ import pandas as pd
 import streamlit as st
 
 from core import books, data, portfolio, returns, risk, trades
-from core.config import TOTAL_COLUMN_NAME
+from core.config import DEFAULT_EQUITY_SIZE, DEFAULT_RATES_SIZE, TOTAL_COLUMN_NAME
 from utils import plotting
 
 # --------------------------------------------------------------------------
@@ -710,6 +710,184 @@ with tabs[3]:
         st.session_state.scenario_book = books.canonicalize_book(
             edited_for_store, book_name="Scenario",
         )
+
+        # ---- Add strategy (bulk) --------------------------------------
+        # Re-insert every row of a known strategy from a source book in
+        # one click. Use case: after pruning `US Rates` from the
+        # scenario, the user wants it back with its standard leg set
+        # rather than re-adding rows one at a time in the form below.
+        #
+        # Sizing rule: the source book's per-row Size magnitude is
+        # discarded — each row gets the equity or rates default based
+        # on its RIC Name (equity = column of eq_returns, rates =
+        # column of rate_returns). The *sign* of the source row's Size
+        # is preserved so longs stay long and shorts stay short. Rows
+        # whose RIC Name isn't in either file fall back to the equity
+        # default with a warning.
+        st.divider()
+        st.markdown("### Add strategy (bulk)")
+        st.caption(
+            "Re-insert every row of a known strategy from a source "
+            "book, in one click. Row sizes are reset to a per-asset-"
+            "class default (sign is preserved from the source). Useful "
+            "for re-adding a strategy you pruned, or for seeding a "
+            "multi-leg strategy without retyping each row."
+        )
+
+        # Build a lookup: strategy → list of (book_label, row_count)
+        # so the source-book picker only offers books that actually
+        # have rows for the chosen strategy.
+        def _strategy_presence(lib: Dict[str, pd.DataFrame], strat: str) -> list[tuple[str, int]]:
+            out: list[tuple[str, int]] = []
+            for name, df in lib.items():
+                if df is None or len(df) == 0 or "Strategy" not in df.columns:
+                    continue
+                n = int((df["Strategy"].astype(str).str.strip() == strat).sum())
+                if n > 0:
+                    out.append((name, n))
+            return out
+
+        as_col1, as_col2 = st.columns([3, 2])
+        bulk_strat = as_col1.selectbox(
+            "Strategy to add",
+            options=[""] + list(strategy_registry_sorted),
+            index=0,
+            help=(
+                "Pick a strategy from the session registry. Only "
+                "registered labels are offered — to add a brand-new "
+                "strategy label, use the single-row Add position form "
+                "below."
+            ),
+            key="bulk_add_strat",
+        )
+
+        bulk_presence = _strategy_presence(library, bulk_strat) if bulk_strat else []
+        bulk_book_labels = [lbl for lbl, _ in bulk_presence]
+        default_book_idx = 0
+        if bulk_book_labels:
+            # Prefer a non-scenario source (the scenario is what we're
+            # writing into — sourcing from itself is usually a no-op).
+            for i, lbl in enumerate(bulk_book_labels):
+                if lbl != "Scenario (editable)":
+                    default_book_idx = i
+                    break
+        bulk_source = as_col2.selectbox(
+            "Source book",
+            options=bulk_book_labels or ["— no books contain this strategy —"],
+            index=default_book_idx,
+            disabled=not bulk_book_labels,
+            help=(
+                "Which book to copy the strategy's rows from. Only "
+                "books that actually have rows for the chosen strategy "
+                "are listed, with their row count."
+            ),
+            format_func=(
+                lambda lbl: f"{lbl}  ({next((n for l, n in bulk_presence if l == lbl), 0)} row(s))"
+                if lbl in bulk_book_labels else lbl
+            ),
+            key="bulk_add_source",
+        )
+
+        as_col3, as_col4, as_col5 = st.columns([2, 2, 1])
+        bulk_eq_default = as_col3.number_input(
+            "Equity default size",
+            value=float(DEFAULT_EQUITY_SIZE),
+            format="%.4f",
+            step=0.005,
+            help=(
+                f"Applied to each row whose RIC Name is an equity / "
+                f"price column. Default {DEFAULT_EQUITY_SIZE:.2%} "
+                "exposure. Sign is taken from the source row."
+            ),
+            key="bulk_eq_default",
+        )
+        bulk_rates_default = as_col4.number_input(
+            "Rates default size",
+            value=float(DEFAULT_RATES_SIZE),
+            format="%.4f",
+            step=0.05,
+            help=(
+                f"Applied to each row whose RIC Name is a rates / "
+                f"yield column. Default {DEFAULT_RATES_SIZE:.2f} years "
+                "of duration. Sign is taken from the source row."
+            ),
+            key="bulk_rates_default",
+        )
+        bulk_submit = as_col5.button(
+            "Add strategy",
+            disabled=not (bulk_strat and bulk_book_labels),
+            use_container_width=True,
+            key="bulk_add_btn",
+            help="Copy every row of the chosen strategy from the source book into the scenario, rewriting Size to the per-asset-class default.",
+        )
+
+        if bulk_submit:
+            src_book = library[bulk_source]
+            strat_rows = src_book[
+                src_book["Strategy"].astype(str).str.strip() == bulk_strat
+            ].copy()
+            if strat_rows.empty:
+                st.error(
+                    f"No rows for **{bulk_strat}** found in **{bulk_source}** "
+                    "— nothing added."
+                )
+            else:
+                eq_cols = set(eq_returns.columns.astype(str))
+                rate_cols = set(rate_returns.columns.astype(str))
+
+                def _resolve_size(row: pd.Series) -> tuple[float, str]:
+                    rn = str(row.get("RIC Name", "")).strip()
+                    src_size = pd.to_numeric(row.get("Size"), errors="coerce")
+                    sign = 1.0
+                    if pd.notna(src_size) and float(src_size) != 0.0:
+                        sign = 1.0 if float(src_size) > 0 else -1.0
+                    if rn in rate_cols:
+                        return sign * float(bulk_rates_default), "rates"
+                    if rn in eq_cols:
+                        return sign * float(bulk_eq_default), "equity"
+                    return sign * float(bulk_eq_default), "unclassified"
+
+                new_rows = []
+                unclassified: list[str] = []
+                for _, row in strat_rows.iterrows():
+                    new_size, cls = _resolve_size(row)
+                    if cls == "unclassified":
+                        unclassified.append(str(row.get("RIC Name", "")))
+                    new_rows.append({
+                        "BookName": "Scenario",
+                        "Strategy": bulk_strat,
+                        "AssetClass": str(row.get("AssetClass", "")).strip(),
+                        "RIC": str(row.get("RIC", "")).strip(),
+                        "RIC Name": str(row.get("RIC Name", "")).strip(),
+                        "Size": new_size,
+                        "EntryDate": pd.to_datetime(row.get("EntryDate"), errors="coerce"),
+                        "ExitDate": pd.to_datetime(row.get("ExitDate"), errors="coerce"),
+                        "Comment": str(row.get("Comment", "")).strip(),
+                        "TradeCount": 1,
+                        "GrossUnderlyingSize": abs(new_size),
+                    })
+
+                combined = pd.concat(
+                    [st.session_state.scenario_book, pd.DataFrame(new_rows)],
+                    ignore_index=True, sort=False,
+                )
+                st.session_state.scenario_book = books.canonicalize_book(
+                    combined, book_name="Scenario",
+                )
+                st.session_state.strategy_registry.add(bulk_strat)
+                _reset_scenario_editor_state()
+                if unclassified:
+                    st.warning(
+                        f"Added **{bulk_strat}** ({len(new_rows)} row(s)) from **{bulk_source}**. "
+                        f"{len(unclassified)} row(s) had a RIC Name not found in the "
+                        "price/rate files — sized at the equity default as a "
+                        f"fallback: {', '.join(sorted(set(unclassified)))}"
+                    )
+                else:
+                    st.toast(
+                        f"Added {bulk_strat} ({len(new_rows)} row(s)) from {bulk_source}."
+                    )
+                st.rerun()
 
         # ---- Add position form ----------------------------------------
         st.divider()
