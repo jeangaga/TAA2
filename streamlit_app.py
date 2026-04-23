@@ -57,7 +57,12 @@ import pandas as pd
 import streamlit as st
 
 from core import books, data, portfolio, returns, risk, trades
-from core.config import DEFAULT_EQUITY_SIZE, DEFAULT_RATES_SIZE, TOTAL_COLUMN_NAME
+from core.config import (
+    ANN_FACTOR,
+    DEFAULT_EQUITY_SIZE,
+    DEFAULT_RATES_SIZE,
+    TOTAL_COLUMN_NAME,
+)
 from utils import plotting
 
 # --------------------------------------------------------------------------
@@ -888,6 +893,100 @@ with tabs[3]:
                         f"Added {bulk_strat} ({len(new_rows)} row(s)) from {bulk_source}."
                     )
                 st.rerun()
+
+        # ---- Scenario risk summary ------------------------------------
+        # Inline risk read-out for the *scenario* itself, independent of
+        # whatever the global Working book picker is on. This is the
+        # quick "what does my scenario look like, risk-wise" panel that
+        # gets used while iterating in the editor — without having to
+        # bounce over to the Risk tab.
+        #
+        # Columns:
+        #   Strategy          — sleeve label, plus a TAA row for the
+        #                       full book.
+        #   Ann.Vol           — standalone annualised vol of the sleeve
+        #                       return series.
+        #   Risk Contrib (vol)— marginal contribution of the sleeve to
+        #                       TAA vol, annualised. Sums across
+        #                       strategies to TAA's Ann.Vol (TAA's own
+        #                       row repeats that total).
+        #   Max.Drawdown      — drawdown of the sleeve's growth-of-1.
+        #
+        # The TAA row is pinned to the top so the eye lands on the
+        # whole-book number first.
+        st.divider()
+        st.markdown("### Scenario risk summary")
+        st.caption(
+            "Standalone vol, contribution to TAA vol, and max drawdown "
+            "for each strategy in the **scenario book** (independent of "
+            "the global Working book picker). Updates on every edit / "
+            "add / prune. For the deeper analytics view, switch the "
+            "Working book to **Scenario (editable)** and use the Risk "
+            "tab."
+        )
+
+        scn_trades_like = books.book_to_trades_frame(st.session_state.scenario_book)
+        scn_strategy_returns, _ = portfolio.build_strategy_returns(
+            asset_returns, scn_trades_like,
+        )
+        if scn_strategy_returns.empty or scn_strategy_returns.shape[1] == 0:
+            st.info(
+                "No return series — the scenario has no rows whose "
+                "RIC Name matches a column in the price / rate files."
+            )
+        else:
+            scn_stats = risk.compute_risk_stats(scn_strategy_returns)
+            scn_contrib = risk.compute_risk_contrib(
+                scn_strategy_returns, total_col=TOTAL_COLUMN_NAME,
+            )
+
+            summary_rows: list[dict] = []
+            for col in scn_strategy_returns.columns:
+                ann_vol = float(scn_stats.loc[col, "Ann.Vol"])
+                max_dd = float(scn_stats.loc[col, "Max.Drawdown"])
+                if col == TOTAL_COLUMN_NAME:
+                    # TAA's contribution to itself == its own vol. We
+                    # report the full annualised total here so the row
+                    # is self-consistent and adds intuition for the
+                    # marginal numbers above.
+                    rc_vol = ann_vol
+                elif not scn_contrib.empty and col in scn_contrib.index:
+                    # `MarginalContribution` is in daily-vol units —
+                    # annualise to align with Ann.Vol.
+                    rc_vol = float(
+                        scn_contrib.loc[col, "MarginalContribution"]
+                    ) * np.sqrt(ANN_FACTOR)
+                else:
+                    rc_vol = float("nan")
+                summary_rows.append({
+                    "Strategy": col,
+                    "Ann.Vol": ann_vol,
+                    "Risk Contrib (vol)": rc_vol,
+                    "Max.Drawdown": max_dd,
+                })
+
+            summary_df = pd.DataFrame(summary_rows)
+            # Pin TAA at the top, then strategies sorted by descending
+            # absolute risk contribution so the biggest movers come first.
+            taa_mask = summary_df["Strategy"] == TOTAL_COLUMN_NAME
+            taa_part = summary_df[taa_mask]
+            strat_part = (
+                summary_df[~taa_mask]
+                .assign(_abs_rc=lambda d: d["Risk Contrib (vol)"].abs())
+                .sort_values("_abs_rc", ascending=False)
+                .drop(columns="_abs_rc")
+            )
+            summary_df = pd.concat([taa_part, strat_part], ignore_index=True)
+
+            st.dataframe(
+                summary_df.style.format({
+                    "Ann.Vol": "{:.2%}",
+                    "Risk Contrib (vol)": "{:.2%}",
+                    "Max.Drawdown": "{:.2%}",
+                }, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         # ---- Add position form ----------------------------------------
         st.divider()
