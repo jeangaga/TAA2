@@ -48,6 +48,23 @@ TOTAL_COLUMN_NAME: str = "TAA"
 
 
 # ---------------------------------------------------------------------------
+# Bulk-add defaults — used by the Editable Scenario "Add strategy" action
+# ---------------------------------------------------------------------------
+# Default magnitudes when copying a strategy's rows from a source book
+# into the scenario in bulk. The sign of the source row's Size is
+# preserved (a short stays short); only the magnitude is rewritten.
+#
+# Classification is done by looking up RIC Name in the loaded market-
+# data frames: columns from TAAEQDaily.csv → equity, columns from
+# TAAratesDaily.csv → rates. Anything unrecognised falls back to the
+# equity default with a surfaced warning, since that is the safer
+# assumption (duration-denominated rates sizes are usually much larger
+# and would distort PnL if applied to the wrong instrument).
+DEFAULT_EQUITY_SIZE: float = 0.01
+DEFAULT_RATES_SIZE: float = 0.15
+
+
+# ---------------------------------------------------------------------------
 # Display conventions  (reserved — to be wired through utils/plotting.py)
 # ---------------------------------------------------------------------------
 # Future home for chart styling so figures stay consistent across tabs.
