@@ -57,7 +57,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from core import books, data, portfolio, returns, risk, trades
+from core import beta, books, data, portfolio, returns, risk, trades
 from core.config import (
     ANN_FACTOR,
     DEFAULT_EQUITY_SIZE,
@@ -1731,6 +1731,181 @@ with tabs[5]:
             )
             if fig_expo is not None:
                 st.plotly_chart(fig_expo, use_container_width=True)
+
+        # ------------------------------------------------------------------
+        # Risk window v2 — phase-1 upgrade.
+        # New blocks (rolling vol, tail risk, concentration, beta exposure)
+        # all run on the SAME `strategy_returns` / `asset_returns` slice the
+        # existing risk analytics use. Sample window is therefore identical
+        # across every block in this tab — no separate beta lookback yet
+        # (deliberate; phase-2 can parameterise without rewriting).
+        # ------------------------------------------------------------------
+
+        # ---- A. Rolling volatility ----
+        st.markdown("---")
+        st.subheader("Rolling volatility")
+        st.caption(
+            "Annualised rolling standard deviation. The first `window − 1` "
+            "rows are NaN by construction. Same return sample as the rest "
+            "of this tab."
+        )
+        rv_windows = (20, 60, 120)
+        rv_cols = st.columns([1, 3])
+        rv_choice = rv_cols[0].selectbox(
+            "Window (business days)",
+            list(rv_windows),
+            index=1,  # 60d default
+            key="risk_rolling_vol_window",
+        )
+        rolling_vols = risk.compute_rolling_vol(
+            strategy_returns, windows=rv_windows,
+        )
+        rv_df = rolling_vols.get(int(rv_choice), pd.DataFrame())
+        if rv_df is None or rv_df.empty or rv_df.dropna(how="all").empty:
+            rv_cols[1].info(
+                "Not enough observations for the selected window."
+            )
+        else:
+            taa_only = (
+                rv_df[[TOTAL_COLUMN_NAME]]
+                if TOTAL_COLUMN_NAME in rv_df.columns
+                else rv_df
+            )
+            rv_cols[1].plotly_chart(
+                plotting.plot_cumulative(
+                    taa_only,
+                    title=f"Rolling annualised vol — TAA ({rv_choice}d)",
+                ),
+                use_container_width=True,
+            )
+            with st.expander("Strategy-level rolling vol"):
+                st.plotly_chart(
+                    plotting.plot_cumulative(
+                        rv_df,
+                        title=f"Rolling annualised vol — Strategies + TAA ({rv_choice}d)",
+                    ),
+                    use_container_width=True,
+                )
+
+        # ---- B. Tail risk: VaR / ES + worst N losses ----
+        st.markdown("---")
+        st.subheader("Tail risk — historical VaR / Expected Shortfall")
+        st.caption(
+            "Non-parametric. Displayed as **positive loss magnitudes** "
+            "(e.g. 5th-percentile return of `-1.8%` shows as `1.80%`). "
+            "ES is the average of returns at-or-beyond the VaR threshold, "
+            "so `ES ≥ VaR` by construction."
+        )
+        var_es = risk.compute_var_es(strategy_returns, levels=(0.95, 0.99))
+        if var_es.empty:
+            st.info("No return observations available for VaR / ES.")
+        else:
+            st.dataframe(
+                var_es.style.format({
+                    "HistVaR_95": "{:.2%}",
+                    "HistES_95": "{:.2%}",
+                    "HistVaR_99": "{:.2%}",
+                    "HistES_99": "{:.2%}",
+                }, na_rep=""),
+                use_container_width=True,
+            )
+
+        st.markdown("**Worst 5 daily TAA losses**")
+        worst = risk.compute_worst_losses(
+            strategy_returns, n=5, total_col=TOTAL_COLUMN_NAME,
+        )
+        if worst.empty:
+            st.info(
+                "TAA total column is missing — no worst-loss table to show."
+            )
+        else:
+            worst_disp = worst.copy()
+            worst_disp["Date"] = pd.to_datetime(worst_disp["Date"]).dt.strftime("%Y-%m-%d")
+            st.dataframe(
+                worst_disp.style.format({"Return": "{:+.2%}"}, na_rep=""),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ---- C. Risk concentration (KPI row) ----
+        st.markdown("---")
+        st.subheader("Risk concentration")
+        st.caption(
+            "Computed from the **Approximate contribution to TAA risk** "
+            "table above. `Effective bets = 1 / Σ wᵢ²` on the absolute, "
+            "normalised RC weights."
+        )
+        conc = risk.compute_concentration_metrics(rc, pct_col="ContribPct")
+        if conc.dropna().empty:
+            st.info("Concentration metrics unavailable (no risk contributions).")
+        else:
+            kpi_cols = st.columns(3)
+            top1 = conc.get("Top1RC", np.nan)
+            top3 = conc.get("Top3RC", np.nan)
+            n_eff = conc.get("EffectiveBets", np.nan)
+            kpi_cols[0].metric(
+                "Top 1 RC",
+                f"{top1:.1%}" if pd.notna(top1) else "—",
+            )
+            kpi_cols[1].metric(
+                "Top 3 RC",
+                f"{top3:.1%}" if pd.notna(top3) else "—",
+            )
+            kpi_cols[2].metric(
+                "Effective bets",
+                f"{n_eff:.2f}" if pd.notna(n_eff) else "—",
+            )
+
+        # ---- D. Beta exposure to key factors ----
+        st.markdown("---")
+        st.subheader("Beta exposure to key factors")
+        st.caption(
+            "**Exposure = current size × regressed beta to factor.** "
+            "Aggregated by Strategy with a `TAA` row equal to the sum of "
+            "strategy rows. Beta is estimated on the same return sample "
+            "as the rest of this Risk tab (no separate lookback yet — "
+            "phase-2)."
+        )
+        factor_returns = beta.build_beta_benchmarks(asset_returns)
+        if not factor_returns:
+            st.info(
+                "None of the default benchmark factors "
+                f"({', '.join(beta.DEFAULT_BENCHMARK_FACTORS)}) are present "
+                "in the loaded market data."
+            )
+        else:
+            asset_betas = beta.compute_asset_factor_betas(
+                asset_returns, factor_returns, min_obs=20,
+            )
+            factor_exposure = beta.compute_strategy_factor_exposure(
+                working_book,
+                asset_betas,
+                factor_names=list(factor_returns.keys()),
+                total_name=TOTAL_COLUMN_NAME,
+            )
+            if factor_exposure.empty:
+                st.info(
+                    "Beta exposure table is empty — either the working book "
+                    "has no priceable positions or every regression failed "
+                    "the minimum-sample guard."
+                )
+            else:
+                exp_fmt = {c: "{:+.4f}" for c in factor_exposure.columns}
+                st.dataframe(
+                    factor_exposure.style.format(exp_fmt, na_rep=""),
+                    use_container_width=True,
+                )
+                with st.expander("Raw asset-vs-factor regression betas"):
+                    st.caption(
+                        "Diagnostic only — these are the un-scaled β "
+                        "coefficients used to build the exposure table "
+                        "above. Cells are NaN when a regression had fewer "
+                        "than 20 overlapping non-NaN observations."
+                    )
+                    st.dataframe(
+                        asset_betas.style.format("{:+.3f}", na_rep=""),
+                        use_container_width=True,
+                    )
 
 
 # --------------------------------------------------------------------------

@@ -154,6 +154,64 @@ Performance and risk analytics on return series.
   sleeves, or total variance is zero/NaN — these guards prevent
   divide-by-zero crashes when the book has no open trades.
 
+- **`compute_rolling_vol(returns, windows=(20, 60, 120), ann_factor=252) → dict[int, DataFrame]`**
+  — Rolling annualised standard deviation. Returns a dict keyed by
+  window; each value preserves the input column set and has the first
+  `window − 1` rows as NaN.
+
+- **`compute_var_es(returns, levels=(0.95, 0.99)) → DataFrame`** —
+  Historical (non-parametric) VaR and ES per column. ES is the mean of
+  the tail returns at-or-beyond the VaR threshold. Both reported as
+  **positive loss magnitudes** so a 5th-percentile return of `-1.8%`
+  shows as `1.80%`. Columns: `HistVaR_95`, `HistES_95`, `HistVaR_99`,
+  `HistES_99`. ``ES ≥ VaR`` by construction.
+
+- **`compute_worst_losses(returns, n=5, total_col="TAA") → DataFrame`**
+  — Worst `n` daily TAA losses, sorted worst → less bad. Returns an
+  empty `[Date, Return]` frame if the total column is missing.
+
+- **`compute_concentration_metrics(risk_contrib, pct_col="ContribPct") → Series`**
+  — `Top1RC`, `Top3RC` (fractional weights in `[0, 1]`) and
+  `EffectiveBets = 1 / Σ wᵢ²` on the absolute, normalised RC weights.
+  NaN for empty / invalid input — never fabricated.
+
+---
+
+## `core/beta.py`
+
+Phase-1 factor-beta engine for the Risk tab. Splits raw beta
+estimation from the PM-facing exposure aggregation so each step is
+independently auditable.
+
+- **`DEFAULT_BENCHMARK_FACTORS`** — column-name list tried against the
+  loaded `asset_returns`: `SPX`, `SX5E`, `UST 5Y`, `UST 10Y`,
+  `UST 30Y`. Missing names are silently skipped.
+
+- **`build_beta_benchmarks(asset_returns) → dict[str, Series]`** —
+  Returns the benchmark factor return-series available in the current
+  session, in display order.
+
+- **`compute_asset_factor_betas(asset_returns, factor_returns, min_obs=20) → DataFrame`**
+  — Univariate OLS beta `Cov / Var` of every asset column vs every
+  factor, computed on overlapping non-NaN observations only. NaN below
+  `min_obs` or for zero-variance factors. Index = asset names; columns
+  = factor names; values = raw regression betas (intermediate object).
+
+- **`compute_strategy_factor_exposure(book, asset_factor_betas, factor_names=None, total_name="TAA") → DataFrame`**
+  — Multiplies each book row's `Size` by its asset-vs-factor beta and
+  aggregates by `Strategy`. Appends a `total_name` row equal to the
+  column-wise sum of strategy rows. Output columns are labelled
+  `"<Factor> Exp"` so the table is never mis-read as a raw beta
+  matrix. NaN propagates with `min_count=1`: a strategy of entirely
+  unmeasurable legs reports NaN, but a strategy with at least one good
+  leg keeps the good leg's exposure.
+
+**Sample-window consistency**: phase-1 deliberately uses the same
+`asset_returns` frame the rest of `core.risk` is computed on. No
+separate beta lookback — the goal is one coherent estimation sample
+across the whole Risk tab. Phase-2 can parameterise without changing
+the public signatures.
+
 ---
 
 ## `core/construction.py`
@@ -391,9 +449,14 @@ tab on every rerun because `_refresh_library` rebuilds
    book**, via `book_to_trades_frame` +
    `portfolio.build_strategy_returns`. Includes an in-tab working-book
    picker that mirrors the sidebar selector.
-6. **Risk** — risk stats, correlation, marginal contribution and
-   exposure heatmap for the **Working book**. Also includes an in-tab
-   working-book picker.
+6. **Risk** — for the **Working book**: existing blocks (risk stats,
+   correlation, marginal contribution, exposure matrix / heatmap)
+   plus the phase-1 v2 upgrade (rolling annualised vol with a 20/60/120
+   window selector, historical VaR + ES at 95/99, worst-5 daily TAA
+   losses, concentration KPIs Top1RC / Top3RC / Effective bets, and a
+   beta-scaled factor-exposure table with raw-β diagnostic). All blocks
+   share the same return-history slice so the window is internally
+   consistent. Also includes an in-tab working-book picker.
 7. **Book Comparison** — baseline selector (default `Current`),
    multi-select `Compare vs`, then book-level KPIs, per-candidate
    strategy-level delta tables, position-level diff tables, and a
