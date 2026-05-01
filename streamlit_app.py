@@ -1787,6 +1787,147 @@ with tabs[5]:
                     use_container_width=True,
                 )
 
+        # ---- A.2. 2-strategy rolling relationship ----
+        # Pairwise extension of the rolling-vol block above. Inherits the
+        # same daily strategy return matrix (`strategy_returns`), the same
+        # window selector (`rv_choice`), and the same NaN warm-up rule
+        # (`min_periods = window`) used by `risk.compute_rolling_vol`,
+        # so this stays a natural extension of the rolling-risk section
+        # rather than a separate analytics engine.
+        st.markdown("**2-strategy rolling relationship**")
+        st.caption(
+            "Pick any two strategies from the working book and inspect "
+            "their pairwise rolling correlation and rolling annualised "
+            "vol. Uses the **same daily return sample and window** as "
+            f"the rolling-vol block above (currently `{rv_choice}d`)."
+        )
+        pair_options = [
+            c for c in strategy_returns.columns if c != TOTAL_COLUMN_NAME
+        ]
+        if len(pair_options) < 2:
+            st.info(
+                "Need at least two strategy return series for a pairwise "
+                f"comparison — the working book only produces "
+                f"{len(pair_options)}."
+            )
+        else:
+            pair_cols = st.columns(2)
+            strat_a = pair_cols[0].selectbox(
+                "Strategy A",
+                pair_options,
+                index=0,
+                key="risk_pair_strategy_a",
+            )
+            # Default Strategy B to the next option that isn't A, so the
+            # initial render shows a meaningful pair instead of corr ≡ 1.
+            default_b_idx = 1 if pair_options[1] != strat_a else (
+                2 if len(pair_options) > 2 else 0
+            )
+            strat_b = pair_cols[1].selectbox(
+                "Strategy B",
+                pair_options,
+                index=default_b_idx,
+                key="risk_pair_strategy_b",
+            )
+
+            if strat_a == strat_b:
+                st.warning(
+                    "Strategy A and Strategy B are the same — rolling "
+                    "correlation will be 1.0 by construction. Pick two "
+                    "different strategies for a meaningful comparison."
+                )
+
+            # Rolling correlation — inline so we don't drag in a new
+            # helper for one expression. `min_periods = w` matches the
+            # NaN philosophy of `risk.compute_rolling_vol` exactly.
+            w = int(rv_choice)
+            a_ret = pd.to_numeric(strategy_returns[strat_a], errors="coerce")
+            b_ret = pd.to_numeric(strategy_returns[strat_b], errors="coerce")
+            roll_corr = (
+                a_ret.rolling(window=w, min_periods=w)
+                     .corr(b_ret)
+                     .rename(f"corr({strat_a}, {strat_b})")
+                     .to_frame()
+            )
+            # Rolling vols come straight from the cached `rolling_vols`
+            # dict, which guarantees we use the same `ann_factor` and the
+            # same warm-up rule as the TAA chart above.
+            pair_vol = (
+                rv_df[[strat_a, strat_b]]
+                if (
+                    not rv_df.empty
+                    and strat_a in rv_df.columns
+                    and strat_b in rv_df.columns
+                )
+                else pd.DataFrame()
+            )
+
+            if roll_corr.dropna(how="all").empty:
+                st.info(
+                    "Not enough overlapping observations to compute the "
+                    "rolling correlation for the selected window."
+                )
+            else:
+                st.plotly_chart(
+                    plotting.plot_cumulative(
+                        roll_corr,
+                        title=f"Rolling correlation — {strat_a} vs {strat_b} ({w}d)",
+                    ),
+                    use_container_width=True,
+                )
+
+            if pair_vol.empty or pair_vol.dropna(how="all").empty:
+                st.info(
+                    "Not enough observations to compute rolling vols "
+                    "for the selected pair / window."
+                )
+            else:
+                st.plotly_chart(
+                    plotting.plot_cumulative(
+                        pair_vol,
+                        title=f"Rolling annualised vol — {strat_a} & {strat_b} ({w}d)",
+                    ),
+                    use_container_width=True,
+                )
+
+            # Latest-value summary. Take the last *non-NaN* row of each
+            # series independently so trailing-NaN tails don't blank
+            # the whole table.
+            latest_corr_s = roll_corr.iloc[:, 0].dropna()
+            latest_vol_a_s = (
+                pair_vol[strat_a].dropna()
+                if (not pair_vol.empty and strat_a in pair_vol.columns)
+                else pd.Series(dtype=float)
+            )
+            latest_vol_b_s = (
+                pair_vol[strat_b].dropna()
+                if (not pair_vol.empty and strat_b in pair_vol.columns)
+                else pd.Series(dtype=float)
+            )
+            if not (latest_corr_s.empty and latest_vol_a_s.empty and latest_vol_b_s.empty):
+                summary = pd.DataFrame(
+                    {
+                        "Latest rolling correlation": [
+                            float(latest_corr_s.iloc[-1]) if not latest_corr_s.empty else np.nan
+                        ],
+                        f"Latest rolling vol — {strat_a}": [
+                            float(latest_vol_a_s.iloc[-1]) if not latest_vol_a_s.empty else np.nan
+                        ],
+                        f"Latest rolling vol — {strat_b}": [
+                            float(latest_vol_b_s.iloc[-1]) if not latest_vol_b_s.empty else np.nan
+                        ],
+                    },
+                    index=[f"{w}d window"],
+                )
+                st.dataframe(
+                    summary.style.format({
+                        "Latest rolling correlation": "{:+.2f}",
+                        f"Latest rolling vol — {strat_a}": "{:.2%}",
+                        f"Latest rolling vol — {strat_b}": "{:.2%}",
+                    }, na_rep=""),
+                    use_container_width=True,
+                )
+
         # ---- B. Tail risk: VaR / ES + worst N losses ----
         st.markdown("---")
         st.subheader("Tail risk — historical VaR / Expected Shortfall")
