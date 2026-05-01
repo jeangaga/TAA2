@@ -1694,13 +1694,6 @@ with tabs[5]:
             use_container_width=True,
         )
 
-        st.subheader("Correlation matrix — Strategies and TAA")
-        st.plotly_chart(
-            plotting.plot_correlation(strategy_returns.corr(),
-                                      title=f"Correlation Matrix — Strategies and TAA ({working_book_name})"),
-            use_container_width=True,
-        )
-
         st.subheader("Approximate contribution to TAA risk")
         rc = risk.compute_risk_contrib(strategy_returns, total_col=TOTAL_COLUMN_NAME)
         if rc.empty:
@@ -1714,34 +1707,68 @@ with tabs[5]:
                 use_container_width=True,
             )
 
-        st.subheader(f"Exposure matrix — Strategy x Asset ({working_book_name})")
-        if len(working_book) > 0:
-            expo = working_book.pivot_table(
-                index="Strategy", columns="RIC Name",
-                values="Size", aggfunc="sum", fill_value=0.0,
-            )
-            expo["TotalNet"] = expo.sum(axis=1)
-            st.dataframe(
-                expo.apply(pd.to_numeric, errors="coerce").style.format("{:+.4f}", na_rep=""),
-                use_container_width=True,
-            )
-            fig_expo = plotting.plot_exposure_heatmap(
-                expo.drop(columns="TotalNet"),
-                title="Exposure heatmap (blue = short, red = long)",
-            )
-            if fig_expo is not None:
-                st.plotly_chart(fig_expo, use_container_width=True)
-
         # ------------------------------------------------------------------
         # Risk window v2 — phase-1 upgrade.
-        # New blocks (rolling vol, tail risk, concentration, beta exposure)
-        # all run on the SAME `strategy_returns` / `asset_returns` slice the
-        # existing risk analytics use. Sample window is therefore identical
-        # across every block in this tab — no separate beta lookback yet
-        # (deliberate; phase-2 can parameterise without rewriting).
+        # Beta exposure, rolling vol, tail risk, and the combined
+        # correlation/concentration block all run on the SAME
+        # `strategy_returns` / `asset_returns` slice the existing risk
+        # analytics use. Sample window is therefore identical across every
+        # block in this tab — no separate beta lookback yet (deliberate;
+        # phase-2 can parameterise without rewriting).
         # ------------------------------------------------------------------
 
-        # ---- A. Rolling volatility ----
+        # ---- A. Beta exposure to key factors ----
+        st.markdown("---")
+        st.subheader("Beta exposure to key factors")
+        st.caption(
+            "**Exposure = current size × regressed beta to factor.** "
+            "Aggregated by Strategy with a `TAA` row equal to the sum of "
+            "strategy rows. Beta is estimated on the same return sample "
+            "as the rest of this Risk tab (no separate lookback yet — "
+            "phase-2)."
+        )
+        factor_returns = beta.build_beta_benchmarks(asset_returns)
+        if not factor_returns:
+            st.info(
+                "None of the default benchmark factors "
+                f"({', '.join(beta.DEFAULT_BENCHMARK_FACTORS)}) are present "
+                "in the loaded market data."
+            )
+        else:
+            asset_betas = beta.compute_asset_factor_betas(
+                asset_returns, factor_returns, min_obs=20,
+            )
+            factor_exposure = beta.compute_strategy_factor_exposure(
+                working_book,
+                asset_betas,
+                factor_names=list(factor_returns.keys()),
+                total_name=TOTAL_COLUMN_NAME,
+            )
+            if factor_exposure.empty:
+                st.info(
+                    "Beta exposure table is empty — either the working book "
+                    "has no priceable positions or every regression failed "
+                    "the minimum-sample guard."
+                )
+            else:
+                exp_fmt = {c: "{:+.4f}" for c in factor_exposure.columns}
+                st.dataframe(
+                    factor_exposure.style.format(exp_fmt, na_rep=""),
+                    use_container_width=True,
+                )
+                with st.expander("Raw asset-vs-factor regression betas"):
+                    st.caption(
+                        "Diagnostic only — these are the un-scaled β "
+                        "coefficients used to build the exposure table "
+                        "above. Cells are NaN when a regression had fewer "
+                        "than 20 overlapping non-NaN observations."
+                    )
+                    st.dataframe(
+                        asset_betas.style.format("{:+.3f}", na_rep=""),
+                        use_container_width=True,
+                    )
+
+        # ---- B. Rolling volatility ----
         st.markdown("---")
         st.subheader("Rolling volatility")
         st.caption(
@@ -1953,7 +1980,7 @@ with tabs[5]:
                             use_container_width=True,
                         )
 
-        # ---- B. Tail risk: VaR / ES + worst N losses ----
+        # ---- C. Tail risk: VaR / ES + worst N losses ----
         st.markdown("---")
         st.subheader("Tail risk — historical VaR / Expected Shortfall")
         st.caption(
@@ -1993,13 +2020,32 @@ with tabs[5]:
                 hide_index=True,
             )
 
-        # ---- C. Risk concentration (KPI row) ----
+        # ---- D. Correlation matrix + Risk concentration ----
+        # Two complementary views of how risk is distributed across the
+        # strategies — the pairwise correlation map plus the concentration
+        # KPIs derived from the contribution table at the top of the tab.
+        # Grouped together because they answer the same question
+        # ("how diversified is the book?") from different angles.
         st.markdown("---")
-        st.subheader("Risk concentration")
+        st.subheader("Correlation matrix and risk concentration")
         st.caption(
-            "Computed from the **Approximate contribution to TAA risk** "
-            "table above. `Effective bets = 1 / Σ wᵢ²` on the absolute, "
-            "normalised RC weights."
+            "Pairwise correlations of the strategy return series, paired "
+            "with concentration KPIs derived from the **Approximate "
+            "contribution to TAA risk** table at the top of this tab. "
+            "Same daily return sample as the rest of this tab."
+        )
+        st.plotly_chart(
+            plotting.plot_correlation(
+                strategy_returns.corr(),
+                title=f"Correlation Matrix — Strategies and TAA ({working_book_name})",
+            ),
+            use_container_width=True,
+        )
+
+        st.markdown("**Risk concentration**")
+        st.caption(
+            "`Effective bets = 1 / Σ wᵢ²` on the absolute, normalised RC "
+            "weights from the contribution table at the top of this tab."
         )
         conc = risk.compute_concentration_metrics(rc, pct_col="ContribPct")
         if conc.dropna().empty:
@@ -2021,57 +2067,6 @@ with tabs[5]:
                 "Effective bets",
                 f"{n_eff:.2f}" if pd.notna(n_eff) else "—",
             )
-
-        # ---- D. Beta exposure to key factors ----
-        st.markdown("---")
-        st.subheader("Beta exposure to key factors")
-        st.caption(
-            "**Exposure = current size × regressed beta to factor.** "
-            "Aggregated by Strategy with a `TAA` row equal to the sum of "
-            "strategy rows. Beta is estimated on the same return sample "
-            "as the rest of this Risk tab (no separate lookback yet — "
-            "phase-2)."
-        )
-        factor_returns = beta.build_beta_benchmarks(asset_returns)
-        if not factor_returns:
-            st.info(
-                "None of the default benchmark factors "
-                f"({', '.join(beta.DEFAULT_BENCHMARK_FACTORS)}) are present "
-                "in the loaded market data."
-            )
-        else:
-            asset_betas = beta.compute_asset_factor_betas(
-                asset_returns, factor_returns, min_obs=20,
-            )
-            factor_exposure = beta.compute_strategy_factor_exposure(
-                working_book,
-                asset_betas,
-                factor_names=list(factor_returns.keys()),
-                total_name=TOTAL_COLUMN_NAME,
-            )
-            if factor_exposure.empty:
-                st.info(
-                    "Beta exposure table is empty — either the working book "
-                    "has no priceable positions or every regression failed "
-                    "the minimum-sample guard."
-                )
-            else:
-                exp_fmt = {c: "{:+.4f}" for c in factor_exposure.columns}
-                st.dataframe(
-                    factor_exposure.style.format(exp_fmt, na_rep=""),
-                    use_container_width=True,
-                )
-                with st.expander("Raw asset-vs-factor regression betas"):
-                    st.caption(
-                        "Diagnostic only — these are the un-scaled β "
-                        "coefficients used to build the exposure table "
-                        "above. Cells are NaN when a regression had fewer "
-                        "than 20 overlapping non-NaN observations."
-                    )
-                    st.dataframe(
-                        asset_betas.style.format("{:+.3f}", na_rep=""),
-                        use_container_width=True,
-                    )
 
 
 # --------------------------------------------------------------------------
