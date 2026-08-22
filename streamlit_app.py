@@ -75,6 +75,7 @@ from core.config import (
     TOTAL_COLUMN_NAME,
 )
 from ui import data_manager as dm
+from ui import market_tab
 from utils import plotting
 
 # --------------------------------------------------------------------------
@@ -423,6 +424,7 @@ top_cols[5].metric("Working book", working_book_name)
 tabs = st.tabs([
     "Raw Trades (audit)",
     "Live Book",
+    "Market",
     "Books Library",
     "Editable Scenario",
     "Constant-exposure backtest",
@@ -490,7 +492,19 @@ with tabs[1]:
 
 
 # --------------------------------------------------------------------------
-# 4. Editable scenario book
+# 3. Market — loaded prices & yields explorer
+# --------------------------------------------------------------------------
+# Independent of the trade book: shows what's currently in the Prices
+# and Rates slots, with per-asset line + daily-change bar charts. Also
+# audits Core-asset presence so a silently-dropped Yahoo ticker
+# (typically an FX pair) shows up here as a red banner instead of a
+# null sleeve buried in Performance / Risk.
+with tabs[2]:
+    market_tab.render(eq_prices, rates_levels)
+
+
+# --------------------------------------------------------------------------
+# 5. Editable scenario book
 # --------------------------------------------------------------------------
 # Helpers scoped to the scenario tab. Canonicalisation (via
 # books.canonicalize_book) is the guard-rail that keeps the book
@@ -508,7 +522,7 @@ def _reset_scenario_editor_state() -> None:
     st.session_state.pop("scenario_editor", None)
 
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("Editable scenario book")
     st.caption(
         "A working copy seeded from any book in the library. Edits live "
@@ -1316,11 +1330,11 @@ strategy_registry_sorted = _refresh_strategy_registry(library)
 
 
 # --------------------------------------------------------------------------
-# 3. Books library — browse / inspect / export / remove. Pure manager.
+# 4. Books library — browse / inspect / export / remove. Pure manager.
 # Book construction (manual edits + transforms + snapshots) lives in the
 # Editable Scenario tab. This tab handles catalogue-level actions only.
 # --------------------------------------------------------------------------
-with tabs[2]:
+with tabs[3]:
     st.subheader("Books library")
     st.caption(
         "Catalogue of every book available to the app. `Current` is "
@@ -1636,7 +1650,7 @@ def _render_working_book_diagnostics() -> None:
 
 
 # --------------------------------------------------------------------------
-# 5. Constant-exposure backtest (formerly "Performance")
+# 6. Constant-exposure backtest (formerly "Performance")
 #
 # This tab is a *fixed-weight backtest / construction baseline*: the
 # selected book is held at constant exposure and projected through the
@@ -1649,7 +1663,7 @@ def _render_working_book_diagnostics() -> None:
 # code below is **UI + state wiring only** — widget construction,
 # session-state handling, formatting, and chart calls.
 # --------------------------------------------------------------------------
-with tabs[4]:
+with tabs[5]:
     st.subheader(f"Constant-exposure backtest — `{working_book_name}`")
     st.info(
         "**This section shows the historical path of the selected book "
@@ -1905,9 +1919,9 @@ with tabs[4]:
 
 
 # --------------------------------------------------------------------------
-# 6. Risk
+# 7. Risk
 # --------------------------------------------------------------------------
-with tabs[5]:
+with tabs[6]:
     st.subheader(f"Risk statistics — `{working_book_name}`")
     st.caption(
         "All tables reflect the **Working book**. Change it here or in "
@@ -2305,9 +2319,9 @@ with tabs[5]:
 
 
 # --------------------------------------------------------------------------
-# 7. Book comparison
+# 8. Book comparison
 # --------------------------------------------------------------------------
-with tabs[6]:
+with tabs[7]:
     st.subheader("Book comparison")
     st.caption(
         "Pick a baseline (default `Current`) and one or more candidate "
@@ -2410,9 +2424,9 @@ with tabs[6]:
 
 
 # --------------------------------------------------------------------------
-# 8. Data quality
+# 9. Data quality
 # --------------------------------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.subheader("Market data — sources & coverage")
     st.caption(
         "One row per data slot. Source, coverage window and missing-value "
