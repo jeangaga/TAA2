@@ -23,7 +23,10 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from plotly.subplots import make_subplots
+
 from core import asset_registry as reg
+from core import technical as tech
 
 
 # --------------------------------------------------------------------------
@@ -144,7 +147,22 @@ def _daily_bar_chart(series: pd.Series, asset: str, is_rate: bool) -> go.Figure:
     return fig
 
 
-def render(eq_prices: pd.DataFrame, rates_levels: pd.DataFrame) -> None:
+def render(
+    eq_prices: pd.DataFrame,
+    rates_levels: pd.DataFrame,
+    ohlc_eq: dict | None = None,
+    ohlc_rates: dict | None = None,
+) -> None:
+    """Render the Market tab.
+
+    ``ohlc_eq`` and ``ohlc_rates`` are ``{internal_name: OHLC DataFrame}``
+    dicts populated by the Yahoo adapter. Empty when the source is
+    GitHub / Upload — the Scan Board falls back to a line chart in
+    that case.
+    """
+    ohlc_eq = ohlc_eq or {}
+    ohlc_rates = ohlc_rates or {}
+
     st.subheader("Market — loaded prices & yields")
     st.caption(
         "Everything currently in the Prices and Rates slots. Missing "
@@ -211,7 +229,7 @@ def render(eq_prices: pd.DataFrame, rates_levels: pd.DataFrame) -> None:
 
     _render_asset_explorer(eq_prices, rates_levels, combined_cols)
     st.divider()
-    _render_scan_board(eq_prices, rates_levels)
+    _render_scan_board(eq_prices, rates_levels, ohlc_eq, ohlc_rates)
 
 
 def _render_asset_explorer(
@@ -246,11 +264,21 @@ def _render_asset_explorer(
 
 
 # --------------------------------------------------------------------------
-# Scan Board — small-multiples grid
+# Scan Board — full technical chart-book
 # --------------------------------------------------------------------------
 _RANGE_LABELS = ["3M", "6M", "1Y", "YTD", "Custom"]
-_SORT_OPTIONS = ["Asset", "Perf", "1D", "1W", "1M", "RSI"]
-_MODE_OPTIONS = ["Normalized", "Level"]
+_SORT_OPTIONS = [
+    "Asset", "Period", "RSI", "vs MA50", "vs MA200",
+    "Distance to Support", "Distance to Resistance",
+]
+_MA_LABELS = ["MA20", "MA50", "MA100", "MA200"]
+_MA_WINDOW = {"MA20": 20, "MA50": 50, "MA100": 100, "MA200": 200}
+_MA_COLOUR = {
+    "MA20": "#ff7f0e",
+    "MA50": "#9467bd",
+    "MA100": "#8c564b",
+    "MA200": "#7f7f7f",
+}
 
 
 def _range_start(range_label: str, end: pd.Timestamp) -> pd.Timestamp:
@@ -262,23 +290,7 @@ def _range_start(range_label: str, end: pd.Timestamp) -> pd.Timestamp:
         return end - pd.DateOffset(years=1)
     if range_label == "YTD":
         return pd.Timestamp(year=end.year, month=1, day=1)
-    return end - pd.DateOffset(months=3)  # fallback
-
-
-def _rsi(series: pd.Series, window: int = 14) -> float | None:
-    """Wilder's RSI(14). Returns the latest value, or None if too short."""
-    s = series.dropna()
-    if len(s) < window + 1:
-        return None
-    delta = s.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    avg_up = up.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
-    avg_down = down.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
-    rs = avg_up / avg_down.replace(0, np.nan)
-    rsi = 100 - 100 / (1 + rs)
-    val = rsi.iloc[-1]
-    return None if pd.isna(val) else float(val)
+    return end - pd.DateOffset(months=6)  # fallback for Custom / unknown
 
 
 def _available_presets(
@@ -307,40 +319,6 @@ def _available_presets(
     return presets
 
 
-def _mini_chart(series: pd.Series, mode: str, is_rate: bool) -> go.Figure:
-    y = series.copy()
-    if mode == "Normalized" and not is_rate and len(y) and y.iloc[0] != 0:
-        y = (y / y.iloc[0]) * 100.0
-    # Colour by direction over the window
-    if len(y) >= 2:
-        up = y.iloc[-1] >= y.iloc[0]
-    else:
-        up = True
-    if is_rate:
-        # Yield up = bond returns down; keep neutral blue so users read the
-        # yield curve on its own terms rather than colour-coding a direction
-        # they might invert mentally.
-        line_color = "#1f77b4"
-    else:
-        line_color = "#2ca02c" if up else "#d62728"
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=y.index, y=y.values, mode="lines",
-        line=dict(color=line_color, width=1.4),
-        hovertemplate="%{x|%Y-%m-%d} · %{y:.4f}<extra></extra>",
-    ))
-    fig.update_layout(
-        height=70,
-        margin=dict(l=0, r=0, t=0, b=0),
-        showlegend=False,
-        xaxis=dict(visible=False, showgrid=False),
-        yaxis=dict(visible=False, showgrid=False),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
-    return fig
-
-
 def _fmt_signed(value: float | None, suffix: str, decimals: int = 2) -> str:
     if value is None or pd.isna(value):
         return "<span style='color:#999'>—</span>"
@@ -351,107 +329,313 @@ def _fmt_signed(value: float | None, suffix: str, decimals: int = 2) -> str:
 
 def _fmt_rsi(rsi: float | None) -> str:
     if rsi is None or pd.isna(rsi):
-        return "<span style='color:#999'>RSI —</span>"
+        return "<span style='color:#999'>—</span>"
     if rsi < 30:
-        colour, tag = "#d62728", "OS"
+        colour, tag = "#d62728", " OS"
     elif rsi > 70:
-        colour, tag = "#2ca02c", "OB"
+        colour, tag = "#2ca02c", " OB"
     else:
         colour, tag = "#666", ""
-    tag_str = f" {tag}" if tag else ""
-    return f"<span style='color:{colour}'>RSI {rsi:.0f}{tag_str}</span>"
+    return f"<span style='color:{colour}'>{rsi:.0f}{tag}</span>"
 
 
-def _build_scan_row(
-    asset: str,
-    series: pd.Series,
-    is_rate: bool,
-) -> dict | None:
-    s = series.dropna()
-    if len(s) < 2:
-        return None
-    perf_val = _bp_change(s, len(s) - 1) if is_rate else _pct_change(s, len(s) - 1)
-    d1 = _bp_change(s, 1) if is_rate else _pct_change(s, 1)
-    w1 = _bp_change(s, 5) if is_rate else _pct_change(s, 5)
-    m1 = _bp_change(s, 21) if is_rate else _pct_change(s, 21)
-    rsi = _rsi(s, window=14)
-    return {
-        "Asset": asset,
-        "series": s,
-        "is_rate": is_rate,
-        "Perf": perf_val,
-        "1D": d1,
-        "1W": w1,
-        "1M": m1,
-        "RSI": rsi,
-        "Start": s.index[0],
-        "End": s.index[-1],
-        "First": float(s.iloc[0]),
-        "Last": float(s.iloc[-1]),
-    }
+def _fmt_level(value: float, is_rate: bool) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if is_rate:
+        return f"{value:.3f}%"
+    if abs(value) >= 1000:
+        return f"{value:,.2f}"
+    return f"{value:.4f}"
 
 
-def _sort_rows(rows: list[dict], sort_by: str) -> list[dict]:
-    if sort_by == "Asset":
-        return sorted(rows, key=lambda r: r["Asset"])
+def _build_frames(
+    universe: list[str],
+    loaded_rates: list[str],
+    eq_prices: pd.DataFrame,
+    rates_levels: pd.DataFrame,
+    ohlc_eq: dict,
+    ohlc_rates: dict,
+) -> dict[str, tuple[pd.DataFrame, bool]]:
+    """Return {asset: (full_frame, is_rate)} using OHLC when available.
 
-    def _key(row: dict) -> float:
-        v = row.get(sort_by)
-        return -1e12 if v is None or pd.isna(v) else float(v)
-
-    return sorted(rows, key=_key, reverse=True)
-
-
-def _render_asset_row(row: dict, mode: str) -> None:
-    is_rate = row["is_rate"]
-    unit = "bp" if is_rate else "%"
-    perf_decimals = 0 if is_rate else 2
-    name_col, chart_col, metrics_col = st.columns([1.5, 5, 4.5])
-
-    with name_col:
-        st.markdown(f"**{row['Asset']}**")
-        st.caption(
-            f"{row['Start'].strftime('%d %b %y')} → {row['End'].strftime('%d %b %y')}"
-        )
-
-    with chart_col:
-        st.plotly_chart(
-            _mini_chart(row["series"], mode, is_rate),
-            use_container_width=True,
-            config={"displayModeBar": False},
-        )
-
-    with metrics_col:
-        if is_rate:
-            level_txt = f"Level {row['Last']:.3f}%"
+    An asset falls back to a Close-only frame (single "Close" column)
+    when its slot's source has no OHLC — legacy CSVs, uploads and
+    GitHub prices all take this path.
+    """
+    out: dict[str, tuple[pd.DataFrame, bool]] = {}
+    for asset in universe:
+        is_rate = asset in loaded_rates
+        ohlc_dict = ohlc_rates if is_rate else ohlc_eq
+        if asset in ohlc_dict and not ohlc_dict[asset].empty:
+            frame = ohlc_dict[asset]
         else:
-            level_txt = f"Last {row['Last']:.4f}"
-        parts = [
-            f"<span style='color:#666'>{level_txt}</span>",
-            f"Perf {_fmt_signed(row['Perf'], unit, perf_decimals)}",
-            f"1D {_fmt_signed(row['1D'], unit, perf_decimals)}",
-            f"1W {_fmt_signed(row['1W'], unit, perf_decimals)}",
-            f"1M {_fmt_signed(row['1M'], unit, perf_decimals)}",
-            _fmt_rsi(row["RSI"]),
-        ]
-        st.markdown(
-            "<div style='font-size:0.85rem;line-height:1.6'>"
-            + " · ".join(parts)
-            + "</div>",
-            unsafe_allow_html=True,
+            src = rates_levels if is_rate else eq_prices
+            if asset not in src.columns:
+                continue
+            close = src[asset].dropna()
+            if close.empty:
+                continue
+            frame = close.to_frame(name="Close")
+        out[asset] = (frame, is_rate)
+    return out
+
+
+def _build_technical_chart(
+    asset: str,
+    full_frame: pd.DataFrame,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    view_mode: str,
+    chart_type: str,
+    active_mas: list[str],
+    show_sr: bool,
+    show_rsi_panel: bool,
+    is_rate: bool,
+) -> go.Figure:
+    """Build one asset's technical chart.
+
+    * Line vs OHLC (falls back to Line if OHLC unavailable).
+    * MA overlays computed on the full history so warm-up doesn't
+      truncate the display window.
+    * Optional support/resistance horizontal lines from swing pivots.
+    * Optional RSI(14) sub-panel below the price pane.
+    """
+    ohlc_available = tech.has_ohlc(full_frame)
+    use_ohlc = chart_type == "OHLC" and ohlc_available and not is_rate
+    if use_ohlc:
+        # Normalising OHLC bars is visually misleading; force Level.
+        view_mode = "Level"
+
+    close = tech.close_of(full_frame).dropna()
+    window_mask = (close.index >= window_start) & (close.index <= window_end)
+    win_close = close[window_mask]
+    if win_close.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            height=260,
+            annotations=[dict(
+                text=f"No data for {asset} in this window",
+                showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5,
+            )],
+            margin=dict(l=40, r=40, t=20, b=30),
         )
+        return fig
+
+    # Scale factor for Normalized view (line charts only)
+    scale = 1.0
+    if view_mode == "Normalized" and not use_ohlc and not is_rate:
+        base = float(win_close.iloc[0])
+        if base != 0:
+            scale = 100.0 / base
+
+    # MAs on the FULL history so no truncation at the display start
+    ma_series: dict[str, pd.Series] = {}
+    for label in active_mas:
+        w = _MA_WINDOW[label]
+        if len(close) >= w:
+            ma_series[label] = tech.moving_average(close, w)
+
+    # S/R on the full frame (uses OHLC High/Low when available)
+    supports: list[float] = []
+    resistances: list[float] = []
+    if show_sr:
+        supports, resistances = tech.find_support_resistance(full_frame)
+
+    # RSI panel needs the full close for warm-up, then sliced to window
+    rsi_series = None
+    if show_rsi_panel and len(close) >= 15:
+        rsi_series = tech.rsi(close, 14)[window_mask]
+
+    two_pane = show_rsi_panel and rsi_series is not None and rsi_series.notna().any()
+    if two_pane:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            row_heights=[0.75, 0.25], vertical_spacing=0.04,
+        )
+        price_row = dict(row=1, col=1)
+    else:
+        fig = go.Figure()
+        price_row = {}
+
+    # Price / OHLC pane
+    if use_ohlc:
+        win_ohlc = full_frame.loc[window_mask]
+        fig.add_trace(
+            go.Ohlc(
+                x=win_ohlc.index,
+                open=win_ohlc["Open"], high=win_ohlc["High"],
+                low=win_ohlc["Low"], close=win_ohlc["Close"],
+                name=asset,
+                increasing_line_color="#2ca02c",
+                decreasing_line_color="#d62728",
+                showlegend=False,
+                hovertext=None,
+            ),
+            **price_row,
+        )
+    else:
+        y = win_close * scale
+        line_color = "#1f77b4"  # neutral — direction is in the metrics
+        fig.add_trace(
+            go.Scatter(
+                x=y.index, y=y.values, mode="lines",
+                line=dict(color=line_color, width=1.8),
+                name=asset, showlegend=False,
+                hovertemplate="%{x|%Y-%m-%d} · %{y:.4f}<extra></extra>",
+            ),
+            **price_row,
+        )
+
+    # Moving-average overlays (sliced to window; rebased if applicable)
+    for label, series in ma_series.items():
+        y = series[window_mask]
+        if y.dropna().empty:
+            continue
+        y = y * scale
+        fig.add_trace(
+            go.Scatter(
+                x=y.index, y=y.values, mode="lines", name=label,
+                line=dict(color=_MA_COLOUR[label], width=1.2, dash="dot"),
+                hovertemplate=f"{label} %{{y:.4f}}<extra></extra>",
+            ),
+            **price_row,
+        )
+
+    # Support / resistance horizontal lines
+    for lvl in resistances:
+        y = lvl * scale
+        annot = f"R {_fmt_level(lvl, is_rate)}"
+        fig.add_hline(
+            y=y, line_dash="dash", line_color="#d62728", opacity=0.55,
+            annotation_text=annot, annotation_position="right",
+            annotation_font=dict(size=10, color="#d62728"),
+            **price_row,
+        )
+    for lvl in supports:
+        y = lvl * scale
+        annot = f"S {_fmt_level(lvl, is_rate)}"
+        fig.add_hline(
+            y=y, line_dash="dash", line_color="#2ca02c", opacity=0.55,
+            annotation_text=annot, annotation_position="right",
+            annotation_font=dict(size=10, color="#2ca02c"),
+            **price_row,
+        )
+
+    # RSI sub-panel
+    if two_pane:
+        fig.add_trace(
+            go.Scatter(
+                x=rsi_series.index, y=rsi_series.values, mode="lines",
+                line=dict(color="#666", width=1),
+                name="RSI14", showlegend=False,
+                hovertemplate="RSI %{y:.0f}<extra></extra>",
+            ),
+            row=2, col=1,
+        )
+        fig.add_hline(y=70, line_dash="dot", line_color="#d62728", opacity=0.4, row=2, col=1)
+        fig.add_hline(y=30, line_dash="dot", line_color="#2ca02c", opacity=0.4, row=2, col=1)
+        fig.update_yaxes(range=[0, 100], title_text="RSI", row=2, col=1)
+
+    height = 400 if two_pane else (320 if use_ohlc else 300)
+    fig.update_layout(
+        height=height,
+        margin=dict(l=40, r=70, t=10, b=25),
+        showlegend=bool(ma_series),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            x=1.0, xanchor="right",
+            font=dict(size=10),
+        ),
+        hovermode="x unified",
+        xaxis_rangeslider_visible=False,  # no OHLC bottom slider
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
+    return fig
+
+
+def _render_technical_metrics(
+    metrics: tech.WindowMetrics,
+    supports: list[float],
+    resistances: list[float],
+    is_rate: bool,
+) -> None:
+    unit = "bp" if is_rate else "%"
+    dec = 0 if is_rate else 2
+
+    perf = metrics.perf_bp if is_rate else metrics.perf_pct
+    w1 = metrics.w1_bp if is_rate else metrics.w1_pct
+    m1 = metrics.m1_bp if is_rate else metrics.m1_pct
+    vs50 = metrics.vs_ma50_bp if is_rate else metrics.vs_ma50_pct
+    vs200 = metrics.vs_ma200_bp if is_rate else metrics.vs_ma200_pct
+    from_hi = metrics.from_high_bp if is_rate else metrics.from_high_pct
+    from_lo = metrics.from_low_bp if is_rate else metrics.from_low_pct
+
+    rows = [
+        ("Last", f"<b>{_fmt_level(metrics.last, is_rate)}</b>"),
+        ("Period", _fmt_signed(perf, unit, dec)),
+        ("1W", _fmt_signed(w1, unit, dec)),
+        ("1M", _fmt_signed(m1, unit, dec)),
+        ("RSI14", _fmt_rsi(metrics.rsi14)),
+        ("vs MA50", _fmt_signed(vs50, unit, dec)),
+        ("vs MA200", _fmt_signed(vs200, unit, dec)),
+        ("W. High", f"{_fmt_level(metrics.high, is_rate)} · {_fmt_signed(from_hi, unit, dec)}"),
+        ("W. Low", f"{_fmt_level(metrics.low, is_rate)} · {_fmt_signed(from_lo, unit, dec)}"),
+    ]
+    if resistances:
+        rows.append(("R1", _fmt_level(resistances[0], is_rate)))
+        if len(resistances) > 1:
+            rows.append(("R2", _fmt_level(resistances[1], is_rate)))
+    if supports:
+        rows.append(("S1", _fmt_level(supports[0], is_rate)))
+        if len(supports) > 1:
+            rows.append(("S2", _fmt_level(supports[1], is_rate)))
+
+    html_rows = "".join(
+        f"<tr><td style='color:#666;padding:1px 8px 1px 0;'>{k}</td>"
+        f"<td style='padding:1px 0;text-align:right'>{v}</td></tr>"
+        for k, v in rows
+    )
+    st.markdown(
+        "<table style='font-size:0.85rem;border-collapse:collapse;width:100%;'>"
+        + html_rows
+        + "</table>",
+        unsafe_allow_html=True,
+    )
+
+
+def _compute_asset_context(
+    frame: pd.DataFrame,
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    is_rate: bool,
+) -> tuple[tech.WindowMetrics, list[float], list[float]] | None:
+    """Compute metrics + S/R for one asset. Returns None if the window is empty."""
+    mask = (frame.index >= window_start) & (frame.index <= window_end)
+    window_frame = frame.loc[mask]
+    if window_frame.empty or len(window_frame) < 2:
+        return None
+    metrics = tech.compute_window_metrics(frame, window_frame, is_rate)
+    supports, resistances = tech.find_support_resistance(frame)
+    return metrics, supports, resistances
 
 
 def _render_scan_board(
     eq_prices: pd.DataFrame,
     rates_levels: pd.DataFrame,
+    ohlc_eq: dict,
+    ohlc_rates: dict,
 ) -> None:
-    st.markdown("### All assets — Scan Board")
+    st.markdown("### All Assets — Technical Scan")
     st.caption(
-        "Small-multiples grid. Every row uses the same date range so paths "
-        "are directly comparable. Rates rows are drawn as raw yield level "
-        "and metrics are reported in **bp**; prices default to a rebase-to-100 "
-        "view so an FX or equity basket lines up cleanly."
+        "Full-height chart book. Every asset gets its own chart with a "
+        "shared date window so trends and levels line up visually. "
+        "OHLC uses Yahoo bars where available and falls back to a line "
+        "chart otherwise; MAs, S/R and the optional RSI panel apply to "
+        "every row consistently."
     )
 
     try:
@@ -470,40 +654,50 @@ def _render_scan_board(
     preset_names = list(presets.keys())
     default_ix = preset_names.index(default_preset)
 
-    c1, c2, c3, c4 = st.columns([2, 3, 2, 2])
-    preset = c1.selectbox(
-        "Family", preset_names, index=default_ix, key="sb_preset",
+    # ---- Toolbar row 1 — universe / range / chart / view
+    r1c1, r1c2, r1c3, r1c4 = st.columns([2, 3, 2, 2])
+    preset = r1c1.selectbox("Family", preset_names, index=default_ix, key="sb_preset")
+    range_label = r1c2.radio(
+        "Range", _RANGE_LABELS, index=1, horizontal=True, key="sb_range",
     )
-    range_label = c2.radio(
-        "Range", _RANGE_LABELS, index=0, horizontal=True, key="sb_range",
+    chart_type = r1c3.radio(
+        "Chart", ["Line", "OHLC"], index=0, horizontal=True, key="sb_chart_type",
     )
-    mode = c3.radio(
-        "View", _MODE_OPTIONS, index=0, horizontal=True, key="sb_mode",
-    )
-    sort_by = c4.selectbox(
-        "Sort by", _SORT_OPTIONS, index=0, key="sb_sort",
+    view_mode = r1c4.radio(
+        "View", ["Level", "Normalized"], index=0, horizontal=True, key="sb_view",
+        help="OHLC forces Level (normalising OHLC bars is visually misleading).",
     )
 
-    # Resolve date range once — use the latest available date across the
-    # selected universe as the reference "now" so we don't need clock access.
+    # ---- Toolbar row 2 — MAs / S/R / RSI panel / sort
+    r2c1, r2c2, r2c3, r2c4 = st.columns([3, 1, 1.4, 2])
+    active_mas = r2c1.multiselect(
+        "Moving averages", _MA_LABELS, default=["MA50", "MA200"], key="sb_mas",
+        help="Computed on the full loaded history so warm-up doesn't clip the display window.",
+    )
+    show_sr = r2c2.checkbox(
+        "S/R", value=False, key="sb_sr",
+        help="Nearest support/resistance from swing pivots clustered by ATR tolerance.",
+    )
+    show_rsi_panel = r2c3.checkbox("RSI panel", value=False, key="sb_rsi")
+    sort_by = r2c4.selectbox("Sort by", _SORT_OPTIONS, index=0, key="sb_sort")
+
+    # ---- Universe + date window
     universe = presets[preset]
     if not universe:
         st.info(f"No loaded assets in family `{preset}`.")
         return
 
-    all_indices = []
-    for asset in universe:
-        src = rates_levels if asset in loaded_rates else eq_prices
-        s = src[asset].dropna()
-        if not s.empty:
-            all_indices.append(s.index[-1])
-    if not all_indices:
+    frames = _build_frames(
+        universe, loaded_rates,
+        eq_prices, rates_levels, ohlc_eq, ohlc_rates,
+    )
+    if not frames:
         st.info("Selected family has no data.")
         return
-    end = max(all_indices)
 
+    end = max(f.index.max() for f, _ in frames.values() if not f.empty)
     if range_label == "Custom":
-        default_start = (end - pd.DateOffset(months=3)).date()
+        default_start = (end - pd.DateOffset(months=6)).date()
         custom = st.date_input(
             "Custom start date", value=default_start, key="sb_custom_start",
         )
@@ -511,25 +705,57 @@ def _render_scan_board(
     else:
         start = _range_start(range_label, end)
 
-    rows: list[dict] = []
-    for asset in universe:
-        is_rate = asset in loaded_rates
-        src = rates_levels if is_rate else eq_prices
-        series = src[asset].dropna()
-        series = series.loc[(series.index >= start) & (series.index <= end)]
-        row = _build_scan_row(asset, series, is_rate)
-        if row is not None:
-            rows.append(row)
+    # ---- Per-asset context (metrics + S/R) — computed once, reused for sort + render
+    contexts: dict[str, tuple[tech.WindowMetrics, list[float], list[float], bool]] = {}
+    for asset, (frame, is_rate) in frames.items():
+        ctx = _compute_asset_context(frame, start, end, is_rate)
+        if ctx is None:
+            continue
+        metrics, supports, resistances = ctx
+        contexts[asset] = (metrics, supports, resistances, is_rate)
 
-    if not rows:
+    if not contexts:
         st.info("No data in this date range for the selected family.")
         return
 
-    rows = _sort_rows(rows, sort_by)
+    # ---- Sort
+    if sort_by == "Asset":
+        sorted_assets = sorted(contexts.keys())
+    else:
+        def _sort_key(asset: str) -> float:
+            metrics, supports, resistances, _ = contexts[asset]
+            v = tech.sort_metric_value(metrics, sort_by, supports, resistances)
+            return -1e12 if v is None or pd.isna(v) else float(v)
+        # Distance sorts are ascending (nearest first); everything else descending.
+        reverse = sort_by not in ("Distance to Support", "Distance to Resistance")
+        sorted_assets = sorted(contexts.keys(), key=_sort_key, reverse=reverse)
+
+    ohlc_supported = sum(1 for a in sorted_assets if tech.has_ohlc(frames[a][0]))
     st.caption(
-        f"{len(rows)} asset(s) · window "
-        f"{start.strftime('%d %b %Y')} → {end.strftime('%d %b %Y')}"
+        f"{len(sorted_assets)} asset(s) · window "
+        f"{start.strftime('%d %b %Y')} → {end.strftime('%d %b %Y')} · "
+        f"chart {chart_type}"
+        + (f" (OHLC on {ohlc_supported}/{len(sorted_assets)})"
+           if chart_type == "OHLC" else "")
+        + f" · view {view_mode}"
     )
-    for row in rows:
-        _render_asset_row(row, mode)
+
+    # ---- Render rows
+    for asset in sorted_assets:
+        frame, is_rate = frames[asset]
+        metrics, supports, resistances, _ = contexts[asset]
+        st.markdown(f"#### {asset}")
+        chart_col, metrics_col = st.columns([4, 1.2])
+        with chart_col:
+            fig = _build_technical_chart(
+                asset, frame, start, end,
+                view_mode, chart_type, active_mas,
+                show_sr, show_rsi_panel, is_rate,
+            )
+            st.plotly_chart(
+                fig, use_container_width=True,
+                config={"displayModeBar": False},
+            )
+        with metrics_col:
+            _render_technical_metrics(metrics, supports, resistances, is_rate)
         st.divider()

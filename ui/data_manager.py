@@ -109,6 +109,11 @@ def init_state() -> None:
         st.session_state.setdefault(f"data_bytes_{k}", None)
         st.session_state.setdefault(f"data_source_{k}", None)
         st.session_state.setdefault(f"data_meta_{k}", {})
+        # Per-asset OHLC frames, only populated when the source is Yahoo.
+        # ``{internal_name: DataFrame[Open, High, Low, Close, Volume]}``.
+        # GitHub / Upload payloads leave this empty — the Market Scan
+        # Board falls back to a line chart when the OHLC dict is missing.
+        st.session_state.setdefault(f"data_ohlc_{k}", {})
     st.session_state.setdefault("_demo_active", False)
 
 
@@ -124,19 +129,35 @@ def get_meta(key: str) -> dict:
     return st.session_state.get(f"data_meta_{key}") or {}
 
 
-def set_data(key: str, payload: bytes, source: str, meta: dict | None = None) -> None:
+def get_ohlc(key: str) -> dict:
+    """Per-asset OHLC dict for a slot (empty when the source has no OHLC)."""
+    return st.session_state.get(f"data_ohlc_{key}") or {}
+
+
+def set_data(
+    key: str,
+    payload: bytes,
+    source: str,
+    meta: dict | None = None,
+    *,
+    ohlc: dict | None = None,
+) -> None:
     st.session_state[f"data_bytes_{key}"] = payload
     st.session_state[f"data_source_{key}"] = source
     st.session_state[f"data_meta_{key}"] = {
         "loaded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         **(meta or {}),
     }
+    # OHLC follows the same lifecycle as the slot itself so we never
+    # leave stale bars pointing at a superseded source.
+    st.session_state[f"data_ohlc_{key}"] = ohlc if ohlc is not None else {}
 
 
 def clear_data(key: str) -> None:
     st.session_state[f"data_bytes_{key}"] = None
     st.session_state[f"data_source_{key}"] = None
     st.session_state[f"data_meta_{key}"] = {}
+    st.session_state[f"data_ohlc_{key}"] = {}
 
 
 def ready() -> bool:
@@ -377,7 +398,8 @@ def _yahoo_fragment() -> None:
     p_col, i_col = st.columns(2)
     period = p_col.selectbox(
         "Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"],
-        index=3, key="dm_yh_period",
+        index=4, key="dm_yh_period",
+        help="≥ 2y is recommended so MA200 is defined across the whole 1Y display window.",
     )
     interval = i_col.selectbox(
         "Interval", ["1d", "1wk", "1mo"], index=0, key="dm_yh_interval",
@@ -549,15 +571,15 @@ def _yahoo_do_import(
             )
 
     empties = [n for n, s in series.items() if s.ohlc.empty]
-    close = yahoo_adapter.to_close_frame(
-        {n: s for n, s in series.items() if not s.ohlc.empty}
-    )
+    non_empty = {n: s for n, s in series.items() if not s.ohlc.empty}
+    close = yahoo_adapter.to_close_frame(non_empty)
     if close.empty:
         if not silent:
             st.error("Yahoo returned no usable rows for the requested tickers.")
         return False
 
     payload = yahoo_adapter.close_frame_to_csv_bytes(close)
+    ohlc_dict = yahoo_adapter.to_ohlc_dict(non_empty)
     set_data(
         slot,
         payload,
@@ -569,6 +591,7 @@ def _yahoo_do_import(
             "empties": empties,
             **_summarise_csv(payload),
         },
+        ohlc=ohlc_dict,
     )
     if not silent:
         loaded = close.shape[1]
@@ -612,10 +635,11 @@ def autoload_core_if_cold() -> None:
         n for n in core
         if (e := reg.lookup(registry, n)) is not None and e.asset_class == "Rate"
     ]
+    # Fetch 2y so MA200 has enough warm-up for any display window ≤ 1Y.
     if price_core:
-        _yahoo_do_import(registry, price_core, "eq", "1y", "1d", "prices", silent=True)
+        _yahoo_do_import(registry, price_core, "eq", "2y", "1d", "prices", silent=True)
     if rate_core:
-        _yahoo_do_import(registry, rate_core, "rates", "1y", "1d", "rates", silent=True)
+        _yahoo_do_import(registry, rate_core, "rates", "2y", "1d", "rates", silent=True)
     _maybe_toast_autoload_empties()
 
 
