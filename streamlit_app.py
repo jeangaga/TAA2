@@ -200,11 +200,20 @@ if not (eq_bytes and rate_bytes and trades_bytes):
     if hdr[1].button("⚙ Data Manager", type="primary", key="dm_open_empty"):
         dm.open_data_manager()
         st.rerun()
+    _missing_labels = [
+        label for key, label in (("eq", "Prices"), ("rates", "Rates"), ("trades", "Trades"))
+        if dm.get_bytes(key) is None
+    ]
+    _missing_str = ", ".join(f"**{m}**" for m in _missing_labels)
+    _yahoo_note = ""
+    if _missing_labels == ["Trades"]:
+        _yahoo_note = (
+            " Yahoo Finance has market data only — load Trades from "
+            "**GitHub** or **File Upload** in the Data Manager."
+        )
     st.info(
-        "Load **Prices**, **Rates** and **Trades** to get started — click "
-        "**⚙ Data Manager** in the header to pull from GitHub, upload "
-        "files, or import from Yahoo Finance. **Books** is optional "
-        "(alternative / saved books)."
+        f"Still missing: {_missing_str}. Click **⚙ Data Manager** in "
+        f"the header to load them.{_yahoo_note}"
     )
     st.stop()
 
