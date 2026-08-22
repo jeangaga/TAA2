@@ -300,48 +300,112 @@ def _render_upload_tab() -> None:
 def _render_yahoo_tab() -> None:
     try:
         registry = reg.load_registry()
+    except FileNotFoundError:
+        st.error(
+            "Asset registry not found. Upload `data/asset_registry.csv` "
+            "to the `data/` folder of the repo — this file ships with the "
+            "code and is required for family quick-load, Core enforcement "
+            "and the Demo Book."
+        )
+        return
     except Exception as e:  # noqa: BLE001
         st.error(f"Asset registry could not be loaded: {e}")
         return
 
-    grouped = reg.by_asset_class(registry)
+    core_names = reg.core_assets(registry)
+    core_display = ", ".join(core_names) if core_names else "(none configured)"
+
     p_col, i_col = st.columns(2)
     period = p_col.selectbox(
         "Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "max"],
         index=3, key="dm_yh_period",
     )
-    interval = i_col.selectbox("Interval", ["1d", "1wk", "1mo"], index=0, key="dm_yh_interval")
+    interval = i_col.selectbox(
+        "Interval", ["1d", "1wk", "1mo"], index=0, key="dm_yh_interval",
+    )
 
-    st.markdown("**Prices (Equity + FX)**")
-    price_names = sorted(grouped.get("Equity", []) + grouped.get("FX", []))
-    price_pick = _ticker_multiselect(registry, price_names, key="dm_yh_price_pick")
-    if price_pick and st.button(
-        "Import as Prices slot", type="primary", key="dm_yh_import_prices"
-    ):
-        _yahoo_import(registry, price_pick, "eq", period, interval, "prices")
+    # ---- Quick Load families -----------------------------------------------
+    family_labels = reg.families(registry)
+    # "All" is a convenience shortcut, not a registry family. Show it last.
+    quick_options = family_labels + (["All"] if family_labels else [])
+    selected_families = st.multiselect(
+        "Quick load families (added to Core; Prices ↔ Equity+FX, Rates ↔ Rate)",
+        quick_options,
+        default=[],
+        key="dm_yh_families",
+        help=(
+            "Selecting FX adds every FX asset with a Yahoo ticker; Equity "
+            "Indices adds every equity index; Rates adds every rate series. "
+            "All expands to every registry entry. Selections are additive; "
+            "core assets are always included."
+        ),
+    )
+    st.caption(f"Core (always included): {core_display}")
 
-    st.markdown("**Rates (yield levels)**")
-    rate_names = sorted(grouped.get("Rate", []))
-    rate_pick = _ticker_multiselect(registry, rate_names, key="dm_yh_rate_pick")
-    if rate_pick and st.button(
-        "Import as Rates slot", type="primary", key="dm_yh_import_rates"
+    grouped = reg.by_asset_class(registry)
+
+    # ---- Prices sub-block (Equity + FX) ------------------------------------
+    st.markdown("**Prices — additional assets (Equity + FX)**")
+    price_universe = sorted(
+        [n for n in grouped.get("Equity", []) if reg.yahoo_tickers(registry, [n])]
+        + [n for n in grouped.get("FX", []) if reg.yahoo_tickers(registry, [n])]
+    )
+    price_manual = st.multiselect(
+        "Assets",
+        price_universe,
+        default=[],
+        key="dm_yh_price_pick",
+        format_func=lambda n: _display(registry, n),
+    )
+    price_effective = reg.resolve_universe(
+        registry,
+        selected_families=selected_families,
+        manual=price_manual,
+        asset_class_filter=("Equity", "FX"),
+    )
+    st.caption(
+        f"Effective Prices universe: {len(price_effective)} "
+        f"asset(s) — {', '.join(price_effective) if price_effective else '(nothing to fetch)'}"
+    )
+    if st.button(
+        "Import as Prices slot", type="primary", key="dm_yh_import_prices",
+        disabled=not price_effective,
     ):
-        _yahoo_import(registry, rate_pick, "rates", period, interval, "rates")
+        _yahoo_do_import(registry, price_effective, "eq", period, interval, "prices")
+
+    # ---- Rates sub-block ---------------------------------------------------
+    st.markdown("**Rates — additional assets (yield levels)**")
+    rate_universe = sorted(
+        [n for n in grouped.get("Rate", []) if reg.yahoo_tickers(registry, [n])]
+    )
+    rate_manual = st.multiselect(
+        "Assets ",
+        rate_universe,
+        default=[],
+        key="dm_yh_rate_pick",
+        format_func=lambda n: _display(registry, n),
+    )
+    rate_effective = reg.resolve_universe(
+        registry,
+        selected_families=selected_families,
+        manual=rate_manual,
+        asset_class_filter=("Rate",),
+    )
+    st.caption(
+        f"Effective Rates universe: {len(rate_effective)} "
+        f"asset(s) — {', '.join(rate_effective) if rate_effective else '(nothing to fetch)'}"
+    )
+    if st.button(
+        "Import as Rates slot", type="primary", key="dm_yh_import_rates",
+        disabled=not rate_effective,
+    ):
+        _yahoo_do_import(registry, rate_effective, "rates", period, interval, "rates")
 
     st.caption(
         "Only assets with a Yahoo ticker in `data/asset_registry.csv` are "
         "shown; forwards and instruments without a clean Yahoo equivalent "
-        "are omitted. Add tickers by editing the CSV in the repo."
-    )
-
-
-def _ticker_multiselect(registry: pd.DataFrame, names: list[str], *, key: str) -> list[str]:
-    available = [n for n in names if reg.yahoo_tickers(registry, [n])]
-    if not available:
-        st.caption("No assets with Yahoo tickers in this group.")
-        return []
-    return st.multiselect(
-        "Assets", available, default=[], key=key, format_func=lambda n: _display(registry, n)
+        "are omitted. Add tickers or families by editing the CSV in the "
+        "repo — no code changes required."
     )
 
 
@@ -352,39 +416,64 @@ def _display(registry: pd.DataFrame, name: str) -> str:
     return f"{e.internal_name} — {e.display_name}" if e.display_name != e.internal_name else name
 
 
-def _yahoo_import(
+def _yahoo_do_import(
     registry: pd.DataFrame,
     names: list[str],
     slot: str,
     period: str,
     interval: str,
     label: str,
-) -> None:
+    *,
+    silent: bool = False,
+) -> bool:
+    """Fetch ``names`` from Yahoo and store the wide close frame in ``slot``.
+
+    Returns ``True`` on success (bytes written), ``False`` otherwise.
+    When ``silent`` is True no ``st.success`` / ``st.error`` / ``st.warning``
+    is emitted — used by the cold-start autoload path.
+    """
     tickers = reg.yahoo_tickers(registry, names)
     if not tickers:
-        st.error("None of the selected assets have a Yahoo ticker.")
-        return
+        if not silent:
+            st.error("None of the selected assets have a Yahoo ticker.")
+        return False
+
     asset_classes = {}
     for n in tickers:
         e = reg.lookup(registry, n)
         if e is not None:
             asset_classes[n] = e.asset_class
-    with st.spinner(f"Fetching {len(tickers)} tickers from Yahoo…"):
-        series = _yahoo_batch_cached(
-            tuple(sorted(tickers.items())),
-            period,
-            interval,
-            tuple(sorted(asset_classes.items())),
-        )
+
+    if silent:
+        try:
+            series = _yahoo_batch_cached(
+                tuple(sorted(tickers.items())),
+                period,
+                interval,
+                tuple(sorted(asset_classes.items())),
+            )
+        except Exception:
+            return False
+    else:
+        with st.spinner(f"Fetching {len(tickers)} tickers from Yahoo…"):
+            series = _yahoo_batch_cached(
+                tuple(sorted(tickers.items())),
+                period,
+                interval,
+                tuple(sorted(asset_classes.items())),
+            )
+
     empties = [n for n, s in series.items() if s.ohlc.empty]
-    if empties:
-        st.warning(f"No data returned for: {', '.join(empties)}")
     close = yahoo_adapter.to_close_frame(
         {n: s for n, s in series.items() if not s.ohlc.empty}
     )
     if close.empty:
-        st.error("Yahoo returned no usable rows.")
-        return
+        if not silent:
+            st.error(
+                "Yahoo returned no usable rows for the requested tickers."
+            )
+        return False
+
     payload = yahoo_adapter.close_frame_to_csv_bytes(close)
     set_data(
         slot,
@@ -393,11 +482,57 @@ def _yahoo_import(
         {
             "filename": f"yahoo_{label}_{period}.csv",
             "tickers": len(tickers),
-            "series_ok": int((close.notna().any()).sum()),
+            "series_ok": close.shape[1],
+            "empties": empties,
             **_summarise_csv(payload),
         },
     )
-    st.success(f"{DATA_LABELS[slot]} slot replaced from Yahoo · {close.shape[1]} series")
+    if not silent:
+        loaded = close.shape[1]
+        total = len(tickers)
+        msg = f"{DATA_LABELS[slot]} slot replaced from Yahoo · {loaded}/{total} series"
+        if empties:
+            preview = ", ".join(empties[:6]) + (" …" if len(empties) > 6 else "")
+            st.warning(f"{msg}. Unavailable on Yahoo: {preview}")
+        else:
+            st.success(msg)
+    return True
+
+
+def autoload_core_if_cold() -> None:
+    """On cold start, silently pull Core from Yahoo into the Prices/Rates slots.
+
+    Runs at most once per session (guarded by ``_core_autoload_attempted``)
+    and is a no-op if any slot is already populated — respecting whatever
+    the user (or a prior rerun) loaded from GitHub / Upload / Yahoo. On
+    network failure the flag is still set so we don't retry mid-session;
+    the empty-state banner then explains what to do.
+    """
+    if st.session_state.get("_core_autoload_attempted"):
+        return
+    if any(get_bytes(k) is not None for k in DATA_KEYS):
+        st.session_state["_core_autoload_attempted"] = True
+        return
+    st.session_state["_core_autoload_attempted"] = True
+    try:
+        registry = reg.load_registry()
+    except Exception:
+        return
+    core = reg.core_assets(registry)
+    if not core:
+        return
+    price_core = [
+        n for n in core
+        if (e := reg.lookup(registry, n)) is not None and e.asset_class in ("Equity", "FX")
+    ]
+    rate_core = [
+        n for n in core
+        if (e := reg.lookup(registry, n)) is not None and e.asset_class == "Rate"
+    ]
+    if price_core:
+        _yahoo_do_import(registry, price_core, "eq", "1y", "1d", "prices", silent=True)
+    if rate_core:
+        _yahoo_do_import(registry, rate_core, "rates", "1y", "1d", "rates", silent=True)
 
 
 # --------------------------------------------------------------------------
