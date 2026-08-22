@@ -181,6 +181,16 @@ def download_batch(
     return out
 
 
+def to_ohlc_dict(series: Mapping[str, MarketSeries]) -> dict[str, pd.DataFrame]:
+    """Extract ``{internal_name: OHLC frame}`` for non-empty series.
+
+    The engine consumes a flat close frame (see ``to_close_frame``); the
+    Market Scan Board wants the full OHLC for candlestick / bar rendering
+    and for High/Low-based swing detection. Both come from the same
+    Yahoo batch, so we keep both handy without a second download."""
+    return {name: s.ohlc.copy() for name, s in series.items() if not s.ohlc.empty}
+
+
 def to_close_frame(series: Mapping[str, MarketSeries]) -> pd.DataFrame:
     """Collapse ``{name: MarketSeries}`` into a Date-indexed wide frame of Close.
 
