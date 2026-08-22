@@ -1,0 +1,41 @@
+InternalName,DisplayName,AssetClass,YahooTicker,ReturnMethod,Notes
+SPX,S&P 500,Equity,^GSPC,pct_change,
+NDX,Nasdaq 100,Equity,^NDX,pct_change,
+SP400,S&P MidCap 400,Equity,,pct_change,No reliable Yahoo ticker
+SX5E,Euro Stoxx 50,Equity,^STOXX50E,pct_change,
+CAC,CAC 40,Equity,^FCHI,pct_change,
+KOSPI,KOSPI Composite,Equity,^KS11,pct_change,
+HSCE,Hang Seng China Enterprises,Equity,,pct_change,Not the same as ^HSI
+EUR,EUR/USD,FX,EURUSD=X,pct_change,
+JPY,USD/JPY,FX,JPY=X,pct_change,
+GBP,GBP/USD,FX,GBPUSD=X,pct_change,
+CHF,USD/CHF,FX,CHF=X,pct_change,
+AUD,AUD/USD,FX,AUDUSD=X,pct_change,
+NZD,NZD/USD,FX,NZDUSD=X,pct_change,
+SEK,USD/SEK,FX,SEK=X,pct_change,
+NOK,USD/NOK,FX,NOK=X,pct_change,
+CAD,USD/CAD,FX,CAD=X,pct_change,
+BRL,USD/BRL,FX,BRL=X,pct_change,
+MXN,USD/MXN,FX,MXN=X,pct_change,
+ZAR,USD/ZAR,FX,ZAR=X,pct_change,
+CZK,USD/CZK,FX,CZK=X,pct_change,
+UST 2Y,US Treasury 2Y Yield,Rate,,neg_dyield,No 2Y series on Yahoo
+UST 5Y,US Treasury 5Y Yield,Rate,^FVX,neg_dyield,
+UST 10Y,US Treasury 10Y Yield,Rate,^TNX,neg_dyield,
+UST 30Y,US Treasury 30Y Yield,Rate,^TYX,neg_dyield,
+DE 2Y,German Bund 2Y Yield,Rate,,neg_dyield,
+DE 5Y,German Bund 5Y Yield,Rate,,neg_dyield,
+DE 10Y,German Bund 10Y Yield,Rate,,neg_dyield,
+DE 30Y,German Bund 30Y Yield,Rate,,neg_dyield,
+US 1Y1Y,US 1Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 2Y1Y,US 2Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 3Y1Y,US 3Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 4Y1Y,US 4Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 5Y1Y,US 5Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 10Y1Y,US 10Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 2Y2Y,US 2Y2Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+US 5Y5Y,US 5Y5Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+EU 1Y1Y,EUR 1Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+EU 2Y1Y,EUR 2Y1Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+EU 2Y2Y,EUR 2Y2Y Forward,Rate,,neg_dyield,Forward not on Yahoo
+EU 5Y5Y,EUR 5Y5Y Forward,Rate,,neg_dyield,Forward not on Yahoo

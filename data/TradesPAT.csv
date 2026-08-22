@@ -1,0 +1,9 @@
+Strategy,RIC,RIC Name,Size,EntryDate,EntryLevel,ExitDate,ExitLevel,move,p&l bp
+long 5y US,US5YT=RR,UST 5Y,0.15,12/20/2024,4.39,,,7.94,-1.2
+US steepener 5y30y,US5y30y,UST 5Y,0.15,12/20/2024,4.39,,,7.94,-1.2
+US steepener 5y30y,US5y30y,UST 30Y,-0.15,12/20/2024,4.78,,,11.01,1.7
+MIDCAP,SP400,SP400,0.0150,12/20/2024,,,,,
+long SPX,SPX,SPX,0.0150,12/20/2024,5900.00,1/10/2025,5780.00,,
+MIDCAP,SP400,SP400,0.0100,1/15/2025,,,,,
+long SPX,SPX,SPX,0.0150,1/14/2025,5850.00,,,,
+,,,,,,,,,

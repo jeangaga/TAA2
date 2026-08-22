@@ -1,0 +1,10 @@
+BookName,Strategy,AssetClass,RIC,RIC Name,Size,EntryDate,ExitDate,Comment
+Defensive tilt,long 5y US,Rates,US5YT=RR,UST 5Y,0.20,2026-01-01,,Larger duration add
+Defensive tilt,US steepener 5y30y,Rates,US5y30y,UST 5Y,0.10,2026-01-01,,Smaller steepener leg
+Defensive tilt,US steepener 5y30y,Rates,US5y30y,UST 30Y,-0.10,2026-01-01,,Smaller steepener leg
+Defensive tilt,MIDCAP,Equity,SP400,SP400,0.010,2026-01-01,,Reduced mid-cap
+Risk-on tilt,long SPX,Equity,SPX,SPX,0.030,2026-01-01,,Double equity
+Risk-on tilt,MIDCAP,Equity,SP400,SP400,0.030,2026-01-01,,Double mid-cap
+Risk-on tilt,long 5y US,Rates,US5YT=RR,UST 5Y,0.05,2026-01-01,,Reduced duration
+Q1 2026 snapshot,long SPX,Equity,SPX,SPX,0.015,2026-01-01,2026-04-01,Book as of start of Q1
+Q1 2026 snapshot,long 5y US,Rates,US5YT=RR,UST 5Y,0.15,2026-01-01,2026-04-01,Book as of start of Q1
