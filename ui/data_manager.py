@@ -1,24 +1,43 @@
 """Data Manager — one dialog that owns every ingestion path.
 
-Replaces the old sidebar uploader block. Each of the four data slots
-(``eq``, ``rates``, ``trades``, ``books``) has a canonical
-session-state tuple: bytes + source label + metadata. Last import wins
-regardless of source. Downstream code reads exclusively through
-``get_bytes`` / ``get_source`` / ``get_meta`` — the old ``gh_*`` keys
-are gone.
+Session-state model
+-------------------
+Each of the four data slots (``eq``, ``rates``, ``trades``, ``books``)
+holds a canonical tuple in session state: bytes + source label +
+metadata. Last import wins regardless of source. Downstream code reads
+exclusively through ``get_bytes`` / ``get_source`` / ``get_meta`` — no
+uploader widgets live outside the dialog.
+
+Dialog UX
+---------
+The dialog uses Streamlit's canonical modal pattern — it opens exactly
+once per header-button click and closes on any Import / Refresh action
+(via ``st.rerun()``) or when the user clicks the ✕ / hits Escape. That
+avoids the "modal keeps re-appearing" bug caused by a persistent
+session flag.
+
+Inside the dialog, each sub-tab (GitHub / Upload / Yahoo) is wrapped in
+``@st.fragment`` so widget interactions rerun only that fragment — the
+dialog itself stays open through multi-select changes, tab switches,
+and preview updates. The Import buttons call ``st.rerun(scope="app")``
+after writing to a slot so the main app immediately re-renders with
+the new data instead of lagging one interaction behind.
 
 Public surface
 --------------
-* ``init_state()``                    — call once per rerun before use.
-* ``get_bytes(key)`` / ``get_source(key)`` / ``get_meta(key)``.
-* ``set_data(key, bytes, source, meta)`` — writes a slot.
-* ``clear_data(key)``.
-* ``ready()`` — bool: prices + rates + trades all loaded.
-* ``open_data_manager()`` — flip the "show dialog" session flag.
-* ``render_dialog(...)``               — renders the modal if flag is set.
-* ``render_status_pill()``             — small readiness badge for the header.
-* ``render_status_line()``             — compact per-slot status string.
-* ``market_data_summary(asset_returns)`` — DataFrame for the Data Quality tab.
+* ``init_state()``                          — call once per rerun.
+* ``get_bytes / get_source / get_meta``     — slot accessors.
+* ``set_data`` / ``clear_data``.
+* ``ready()``                               — prices + rates loaded.
+* ``set_demo_active(flag)``                 — main app tells DM whether
+                                              the Demo Book is standing
+                                              in for Trades.
+* ``render_dialog_button(label, key)``      — renders a button that
+                                              opens the dialog when
+                                              clicked (canonical pattern).
+* ``autoload_core_if_cold()``               — first-open convenience.
+* ``render_status_pill()`` / ``render_status_line()``.
+* ``market_data_summary(asset_returns)``.
 """
 from __future__ import annotations
 
@@ -32,6 +51,36 @@ from core import asset_registry as reg
 from core.adapters import github as gh_adapter
 from core.adapters import upload as upload_adapter
 from core.adapters import yahoo as yahoo_adapter
+
+# --------------------------------------------------------------------------
+# Streamlit-version compatibility shims
+# --------------------------------------------------------------------------
+# `st.fragment` promoted from experimental in 1.37; the experimental
+# name still works. A no-op decorator is used as a last-resort fallback
+# so an older Streamlit runs (with slightly worse dialog UX) rather
+# than crashing on import.
+if hasattr(st, "fragment"):
+    _fragment = st.fragment
+elif hasattr(st, "experimental_fragment"):
+    _fragment = st.experimental_fragment
+else:  # pragma: no cover - very old Streamlit
+    def _fragment(fn):
+        return fn
+
+
+def _rerun_app() -> None:
+    """Full app rerun, from inside a fragment or outside.
+
+    ``st.rerun(scope="app")`` explicitly reruns the whole script even
+    when called from inside a fragment; plain ``st.rerun()`` in a
+    fragment only reruns the fragment. Older Streamlits without the
+    scope kwarg get a plain rerun.
+    """
+    try:
+        st.rerun(scope="app")
+    except TypeError:  # pragma: no cover - Streamlit < 1.36
+        st.rerun()
+
 
 # --------------------------------------------------------------------------
 # Slot registry
@@ -49,18 +98,18 @@ DATA_FILENAMES = {
     "trades": "TradesPAT.csv",
     "books": "Books.csv",
 }
-REQUIRED_KEYS = ["eq", "rates", "trades"]  # books is optional
+REQUIRED_KEYS = ["eq", "rates"]  # trades optional (Demo Book stands in)
 
 
 # --------------------------------------------------------------------------
 # Session-state helpers
 # --------------------------------------------------------------------------
 def init_state() -> None:
-    st.session_state.setdefault("show_data_manager", False)
     for k in DATA_KEYS:
         st.session_state.setdefault(f"data_bytes_{k}", None)
         st.session_state.setdefault(f"data_source_{k}", None)
         st.session_state.setdefault(f"data_meta_{k}", {})
+    st.session_state.setdefault("_demo_active", False)
 
 
 def get_bytes(key: str):
@@ -94,12 +143,14 @@ def ready() -> bool:
     return all(get_bytes(k) is not None for k in REQUIRED_KEYS)
 
 
-def open_data_manager() -> None:
-    st.session_state["show_data_manager"] = True
+def set_demo_active(active: bool) -> None:
+    """Main app tells the Data Manager whether the Demo Book stands in
+    for Trades — used to relabel the ``Trades`` row in Currently loaded."""
+    st.session_state["_demo_active"] = bool(active)
 
 
-def close_data_manager() -> None:
-    st.session_state["show_data_manager"] = False
+def _is_demo_active() -> bool:
+    return bool(st.session_state.get("_demo_active"))
 
 
 # --------------------------------------------------------------------------
@@ -135,7 +186,6 @@ def _short_date(iso_ts: str | None) -> str:
 
 
 def render_status_pill() -> str:
-    """Return a short readiness pill (used inside the header)."""
     if ready():
         return "Data: ✓ Ready"
     missing = [DATA_LABELS[k] for k in REQUIRED_KEYS if get_bytes(k) is None]
@@ -143,7 +193,6 @@ def render_status_pill() -> str:
 
 
 def render_status_line() -> str:
-    """One-line human summary of loaded data — used under the title."""
     bits = []
     for k in DATA_KEYS:
         src = get_source(k)
@@ -156,11 +205,6 @@ def render_status_line() -> str:
 
 
 def market_data_summary(asset_returns: pd.DataFrame) -> pd.DataFrame:
-    """Per-slot rows for the Data Quality tab.
-
-    Reports source, coverage window and (for prices/rates) simple
-    missing-value stats measured on the joined ``asset_returns`` frame.
-    """
     rows = []
     for k in DATA_KEYS:
         src = get_source(k)
@@ -195,7 +239,7 @@ def market_data_summary(asset_returns: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# Sub-tab renderers (each writes its result into session state)
+# CSV summariser
 # --------------------------------------------------------------------------
 def _summarise_csv(payload: bytes) -> dict:
     try:
@@ -216,7 +260,12 @@ def _summarise_csv(payload: bytes) -> dict:
     return meta
 
 
-def _render_github_tab() -> None:
+# --------------------------------------------------------------------------
+# Sub-tab fragments — each rerun independently so the dialog stays open
+# across widget interactions
+# --------------------------------------------------------------------------
+@_fragment
+def _github_fragment() -> None:
     st.caption(
         "Fetch the four canonical CSVs directly from "
         f"[`jeangaga/TAA2/input`]({gh_adapter.GITHUB_REPO_URL})."
@@ -244,6 +293,8 @@ def _render_github_tab() -> None:
             st.success("Loaded: " + ", ".join(ok))
         if fail:
             st.error("Failed: " + "; ".join(fail))
+        if ok:
+            _rerun_app()  # main app must see the new bytes now, not on next click
     for k in DATA_KEYS:
         src = get_source(k)
         if src == "github":
@@ -251,7 +302,8 @@ def _render_github_tab() -> None:
             st.caption(f"✓ {DATA_LABELS[k]}: {m.get('rows', '?')} rows")
 
 
-def _render_upload_tab() -> None:
+@_fragment
+def _upload_fragment() -> None:
     kind_label = st.radio(
         "What kind of data is this?",
         ["Prices", "Rates", "Trades", "Books"],
@@ -281,12 +333,17 @@ def _render_upload_tab() -> None:
     dec_col.metric("Decimal", meta["decimal"])
     r_col.metric("Rows detected", meta["rows"])
 
-    st.caption(f"Columns: {', '.join(map(str, meta['columns'][:12]))}"
-               + (" …" if len(meta["columns"]) > 12 else ""))
+    st.caption(
+        f"Columns: {', '.join(map(str, meta['columns'][:12]))}"
+        + (" …" if len(meta["columns"]) > 12 else "")
+    )
     st.dataframe(df.head(10), use_container_width=True)
 
-    if st.button(f"Confirm — replace {kind_label} slot", type="primary",
-                 key=f"dm_upload_confirm_{kind_key}"):
+    if st.button(
+        f"Confirm — replace {kind_label} slot",
+        type="primary",
+        key=f"dm_upload_confirm_{kind_key}",
+    ):
         payload = upload_adapter.normalise_to_csv_bytes(df)
         set_data(
             kind_key,
@@ -295,9 +352,11 @@ def _render_upload_tab() -> None:
             {"filename": uploaded.name, **_summarise_csv(payload)},
         )
         st.success(f"{kind_label} slot replaced from upload · {uploaded.name}")
+        _rerun_app()
 
 
-def _render_yahoo_tab() -> None:
+@_fragment
+def _yahoo_fragment() -> None:
     try:
         registry = reg.load_registry()
     except FileNotFoundError:
@@ -324,9 +383,7 @@ def _render_yahoo_tab() -> None:
         "Interval", ["1d", "1wk", "1mo"], index=0, key="dm_yh_interval",
     )
 
-    # ---- Quick Load families -----------------------------------------------
     family_labels = reg.families(registry)
-    # "All" is a convenience shortcut, not a registry family. Show it last.
     quick_options = family_labels + (["All"] if family_labels else [])
     selected_families = st.multiselect(
         "Quick load families (added to Core; Prices ↔ Equity+FX, Rates ↔ Rate)",
@@ -344,7 +401,6 @@ def _render_yahoo_tab() -> None:
 
     grouped = reg.by_asset_class(registry)
 
-    # ---- Prices sub-block (Equity + FX) ------------------------------------
     st.markdown("**Prices — additional assets (Equity + FX)**")
     price_universe = sorted(
         [n for n in grouped.get("Equity", []) if reg.yahoo_tickers(registry, [n])]
@@ -371,9 +427,9 @@ def _render_yahoo_tab() -> None:
         "Import as Prices slot", type="primary", key="dm_yh_import_prices",
         disabled=not price_effective,
     ):
-        _yahoo_do_import(registry, price_effective, "eq", period, interval, "prices")
+        if _yahoo_do_import(registry, price_effective, "eq", period, interval, "prices"):
+            _rerun_app()
 
-    # ---- Rates sub-block ---------------------------------------------------
     st.markdown("**Rates — additional assets (yield levels)**")
     rate_universe = sorted(
         [n for n in grouped.get("Rate", []) if reg.yahoo_tickers(registry, [n])]
@@ -399,7 +455,8 @@ def _render_yahoo_tab() -> None:
         "Import as Rates slot", type="primary", key="dm_yh_import_rates",
         disabled=not rate_effective,
     ):
-        _yahoo_do_import(registry, rate_effective, "rates", period, interval, "rates")
+        if _yahoo_do_import(registry, rate_effective, "rates", period, interval, "rates"):
+            _rerun_app()
 
     st.caption(
         "Only assets with a Yahoo ticker in `data/asset_registry.csv` are "
@@ -409,6 +466,34 @@ def _render_yahoo_tab() -> None:
     )
 
 
+@_fragment
+def _loaded_fragment() -> None:
+    demo_on = _is_demo_active()
+    st.markdown("**Currently loaded**")
+    for k in DATA_KEYS:
+        src = get_source(k)
+        cols = st.columns([2, 3, 1])
+        cols[0].write(f"**{DATA_LABELS[k]}**")
+        if src is None:
+            if k == "trades" and demo_on:
+                cols[1].caption("— not loaded (Scenario draft is active)")
+            elif k == "books" and demo_on:
+                cols[1].caption("— not loaded (optional)")
+            else:
+                cols[1].caption("— not loaded")
+        else:
+            m = get_meta(k)
+            cols[1].caption(
+                f"{src} · {m.get('filename', '')} · {m.get('rows', '?')} rows"
+            )
+        if src is not None and cols[2].button("Clear", key=f"dm_clear_{k}"):
+            clear_data(k)
+            _rerun_app()
+
+
+# --------------------------------------------------------------------------
+# Helpers used by the Yahoo fragment
+# --------------------------------------------------------------------------
 def _display(registry: pd.DataFrame, name: str) -> str:
     e = reg.lookup(registry, name)
     if e is None:
@@ -428,9 +513,9 @@ def _yahoo_do_import(
 ) -> bool:
     """Fetch ``names`` from Yahoo and store the wide close frame in ``slot``.
 
-    Returns ``True`` on success (bytes written), ``False`` otherwise.
-    When ``silent`` is True no ``st.success`` / ``st.error`` / ``st.warning``
-    is emitted — used by the cold-start autoload path.
+    Returns ``True`` on success (bytes written). When ``silent`` is
+    True no ``st.success`` / ``st.error`` / ``st.warning`` is emitted —
+    used by the cold-start autoload path.
     """
     tickers = reg.yahoo_tickers(registry, names)
     if not tickers:
@@ -469,9 +554,7 @@ def _yahoo_do_import(
     )
     if close.empty:
         if not silent:
-            st.error(
-                "Yahoo returned no usable rows for the requested tickers."
-            )
+            st.error("Yahoo returned no usable rows for the requested tickers.")
         return False
 
     payload = yahoo_adapter.close_frame_to_csv_bytes(close)
@@ -500,14 +583,7 @@ def _yahoo_do_import(
 
 
 def autoload_core_if_cold() -> None:
-    """On cold start, silently pull Core from Yahoo into the Prices/Rates slots.
-
-    Runs at most once per session (guarded by ``_core_autoload_attempted``)
-    and is a no-op if any slot is already populated — respecting whatever
-    the user (or a prior rerun) loaded from GitHub / Upload / Yahoo. On
-    network failure the flag is still set so we don't retry mid-session;
-    the empty-state banner then explains what to do.
-    """
+    """Cold-start convenience: pull Core into the Prices/Rates slots."""
     if st.session_state.get("_core_autoload_attempted"):
         return
     if any(get_bytes(k) is not None for k in DATA_KEYS):
@@ -536,43 +612,43 @@ def autoload_core_if_cold() -> None:
 
 
 # --------------------------------------------------------------------------
-# The dialog
+# The dialog + its entry-point button
 # --------------------------------------------------------------------------
 @st.dialog("Data Manager", width="large")
 def _dialog_body() -> None:
     tab_labels = ["GitHub", "File Upload", "Yahoo Finance"]
     tabs = st.tabs(tab_labels)
     with tabs[0]:
-        _render_github_tab()
+        _github_fragment()
     with tabs[1]:
-        _render_upload_tab()
+        _upload_fragment()
     with tabs[2]:
-        _render_yahoo_tab()
-
+        _yahoo_fragment()
     st.divider()
-    st.markdown("**Currently loaded**")
-    for k in DATA_KEYS:
-        src = get_source(k)
-        cols = st.columns([2, 3, 1])
-        cols[0].write(f"**{DATA_LABELS[k]}**")
-        if src is None:
-            cols[1].caption("— not loaded")
-        else:
-            m = get_meta(k)
-            cols[1].caption(
-                f"{src} · {m.get('filename', '')} · {m.get('rows', '?')} rows"
-            )
-        if src is not None and cols[2].button("Clear", key=f"dm_clear_{k}"):
-            clear_data(k)
-            st.rerun()
-
-    st.divider()
-    if st.button("Close", key="dm_close"):
-        close_data_manager()
-        st.rerun()
+    _loaded_fragment()
 
 
-def render_dialog() -> None:
-    """Render the dialog if the ``show_data_manager`` flag is set."""
-    if st.session_state.get("show_data_manager"):
+def render_dialog_button(
+    label: str = "⚙ Data Manager",
+    *,
+    key: str,
+    container=None,
+    use_container_width: bool = False,
+    button_type: str = "secondary",
+) -> None:
+    """Render the "open Data Manager" button and open the modal on click.
+
+    Uses Streamlit's canonical modal pattern: the button click is the
+    only trigger, and the dialog closes on the next rerun (which we
+    fire ourselves from every Import/Refresh/Clear action, so the main
+    app also updates in the same step).
+    """
+    target = container if container is not None else st
+    clicked = target.button(
+        label,
+        key=key,
+        type=button_type,
+        use_container_width=use_container_width,
+    )
+    if clicked:
         _dialog_body()
