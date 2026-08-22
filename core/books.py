@@ -565,8 +565,7 @@ def cumulative_performance(
 # exactly like any other book; the ``BookName`` value is the runtime marker
 # downstream code can key off to render "DEMO" badges or exclude it from
 # comparisons.
-DEMO_BOOK_NAME = "Demo Book"
-DEMO_STRATEGY = "Demo"
+DEMO_BOOK_NAME = "Scenario draft"
 DEMO_COMMENT = "Demo portfolio position"
 
 
@@ -574,17 +573,20 @@ def build_demo_book(
     registry: pd.DataFrame,
     entry_date: Optional[pd.Timestamp] = None,
     book_name: str = DEMO_BOOK_NAME,
-    strategy: str = DEMO_STRATEGY,
 ) -> pd.DataFrame:
-    """Build the Demo Book directly from the asset registry.
+    """Build the demo/scenario-draft book directly from the asset registry.
 
     Rows come from every registry entry flagged ``DefaultCore=TRUE``
-    with a parseable ``DemoSize``. The current registry seeds three
-    positions:
+    with a parseable ``DemoSize``. Each row uses its own ``DemoStrategy``
+    label (falling back to ``InternalName``) so the sleeves show up
+    separately in strategy-level analytics — e.g. ``SPX`` / ``EURUSD``
+    / ``US10Y`` rather than one merged ``Demo`` sleeve.
 
-    * ``SPX``      Size ``0.01``  (+1% equity exposure)
-    * ``UST 10Y``  Size ``0.20``  (long 0.2y duration)
-    * ``EUR``      Size ``0.02``  (+2% FX exposure)
+    Current registry seeds three positions:
+
+    * Strategy ``SPX``     · RIC ``SPX``      · Size ``0.01``  (+1% equity)
+    * Strategy ``US10Y``   · RIC ``UST 10Y``  · Size ``0.20``  (0.2y duration)
+    * Strategy ``EURUSD``  · RIC ``EUR``      · Size ``0.02``  (+2% FX)
 
     Sizes are interpreted by the existing engine convention:
 
@@ -603,10 +605,10 @@ def build_demo_book(
         return _empty_book(book_name)
 
     rows = []
-    for name, size, asset_class in positions:
+    for name, size, asset_class, strategy_label in positions:
         rows.append({
             "BookName": book_name,
-            "Strategy": strategy,
+            "Strategy": strategy_label,
             "AssetClass": asset_class,
             "RIC": name,
             "RIC Name": name,

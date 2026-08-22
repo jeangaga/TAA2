@@ -54,6 +54,7 @@ REGISTRY_COLUMNS = [
     "Subfamily",
     "DefaultCore",
     "DemoSize",
+    "DemoStrategy",
     "Notes",
 ]
 
@@ -202,19 +203,22 @@ def by_family(registry: pd.DataFrame) -> dict[str, list[str]]:
     return out
 
 
-def demo_positions(registry: pd.DataFrame) -> list[tuple[str, float, str]]:
-    """Return (InternalName, DemoSize, AssetClass) tuples for the Demo Book.
+def demo_positions(registry: pd.DataFrame) -> list[tuple[str, float, str, str]]:
+    """Return ``(InternalName, DemoSize, AssetClass, DemoStrategy)`` tuples.
 
     Only rows with ``DefaultCore=TRUE`` **and** a parseable ``DemoSize``
     contribute — a mistyped size drops the row rather than crashing.
+    ``DemoStrategy`` falls back to ``InternalName`` when the registry
+    row leaves it blank, so a valid label is always returned.
     """
     df = registry[registry["_DefaultCoreBool"]]
-    out: list[tuple[str, float, str]] = []
+    out: list[tuple[str, float, str, str]] = []
     for _, r in df.iterrows():
         size = r["_DemoSizeNum"]
         if size is None:
             continue
-        out.append((r["InternalName"], float(size), r["AssetClass"]))
+        label = str(r.get("DemoStrategy", "")).strip() or r["InternalName"]
+        out.append((r["InternalName"], float(size), r["AssetClass"], label))
     return out
 
 
