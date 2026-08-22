@@ -583,8 +583,15 @@ def _yahoo_do_import(
 
 
 def autoload_core_if_cold() -> None:
-    """Cold-start convenience: pull Core into the Prices/Rates slots."""
+    """Cold-start convenience: pull Core into the Prices/Rates slots.
+
+    Runs at most once per session (guarded by
+    ``_core_autoload_attempted``). Empties per slot are recorded in
+    session state so subsequent renders can surface them — the user
+    should not have to guess why a Core sleeve is null.
+    """
     if st.session_state.get("_core_autoload_attempted"):
+        _maybe_toast_autoload_empties()
         return
     if any(get_bytes(k) is not None for k in DATA_KEYS):
         st.session_state["_core_autoload_attempted"] = True
@@ -609,6 +616,24 @@ def autoload_core_if_cold() -> None:
         _yahoo_do_import(registry, price_core, "eq", "1y", "1d", "prices", silent=True)
     if rate_core:
         _yahoo_do_import(registry, rate_core, "rates", "1y", "1d", "rates", silent=True)
+    _maybe_toast_autoload_empties()
+
+
+def _maybe_toast_autoload_empties() -> None:
+    """One-shot toast listing Core tickers Yahoo failed to return."""
+    if st.session_state.get("_core_autoload_toast_shown"):
+        return
+    empties: list[str] = []
+    for slot in ("eq", "rates"):
+        meta = get_meta(slot)
+        empties.extend(meta.get("empties", []) or [])
+    if empties:
+        st.toast(
+            "Yahoo returned no data for: " + ", ".join(empties)
+            + ". Retry from ⚙ Data Manager.",
+            icon="⚠️",
+        )
+    st.session_state["_core_autoload_toast_shown"] = True
 
 
 # --------------------------------------------------------------------------
