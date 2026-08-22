@@ -555,3 +555,88 @@ def cumulative_performance(
         return pd.DataFrame(index=asset_returns.index)
     ret = pd.concat(frames, axis=1).fillna(0.0)
     return compute_cumulative(ret)
+
+
+# ---------------------------------------------------------------------------
+# Demo book — in-memory portfolio activated when no real trades are loaded
+# ---------------------------------------------------------------------------
+# Kept in this module (rather than in a Streamlit UI file) so it is a pure
+# pandas function callable from any context. The engine treats a demo book
+# exactly like any other book; the ``BookName`` value is the runtime marker
+# downstream code can key off to render "DEMO" badges or exclude it from
+# comparisons.
+DEMO_BOOK_NAME = "Demo Book"
+DEMO_STRATEGY = "Demo"
+DEMO_COMMENT = "Demo portfolio position"
+
+
+def build_demo_book(
+    registry: pd.DataFrame,
+    entry_date: Optional[pd.Timestamp] = None,
+    book_name: str = DEMO_BOOK_NAME,
+    strategy: str = DEMO_STRATEGY,
+) -> pd.DataFrame:
+    """Build the Demo Book directly from the asset registry.
+
+    Rows come from every registry entry flagged ``DefaultCore=TRUE``
+    with a parseable ``DemoSize``. The current registry seeds three
+    positions:
+
+    * ``SPX``      Size ``0.01``  (+1% equity exposure)
+    * ``UST 10Y``  Size ``0.20``  (long 0.2y duration)
+    * ``EUR``      Size ``0.02``  (+2% FX exposure)
+
+    Sizes are interpreted by the existing engine convention:
+
+    * Equity / FX rows → sleeve return = ``Size × pct_change``.
+    * Rate rows        → sleeve return = ``Size × -Δyield × 0.01``
+      (so ``Size`` is duration in years).
+
+    The result already satisfies the "one row per Strategy × RIC × RIC
+    Name" invariant so callers can hand it straight to
+    :func:`book_to_trades_frame` without re-canonicalisation.
+    """
+    from core.asset_registry import demo_positions  # local import: avoid cycles at module load
+
+    positions = demo_positions(registry)
+    if not positions:
+        return _empty_book(book_name)
+
+    rows = []
+    for name, size, asset_class in positions:
+        rows.append({
+            "BookName": book_name,
+            "Strategy": strategy,
+            "AssetClass": asset_class,
+            "RIC": name,
+            "RIC Name": name,
+            "Size": float(size),
+            "EntryDate": entry_date if entry_date is not None else pd.NaT,
+            "ExitDate": pd.NaT,
+            "Comment": DEMO_COMMENT,
+            "TradeCount": 1,
+            "GrossUnderlyingSize": float(abs(size)),
+        })
+    df = pd.DataFrame(rows, columns=BOOK_COLUMNS)
+    df["EntryDate"] = pd.to_datetime(df["EntryDate"], errors="coerce")
+    df["ExitDate"] = pd.to_datetime(df["ExitDate"], errors="coerce")
+    return df
+
+
+def demo_book_summary(book: pd.DataFrame) -> str:
+    """Compact one-line description used in the header banner.
+
+    Example output: ``"SPX +1.00% · UST 10Y +0.20y · EUR +2.00%"``.
+    Rate rows are formatted as duration years; everything else as
+    percentage exposure. Empty book → empty string.
+    """
+    if book is None or len(book) == 0:
+        return ""
+    bits: list[str] = []
+    for _, r in book.iterrows():
+        size = float(r["Size"])
+        if r.get("AssetClass") == "Rate":
+            bits.append(f"{r['RIC Name']} {size:+.2f}y")
+        else:
+            bits.append(f"{r['RIC Name']} {size * 100:+.2f}%")
+    return " · ".join(bits)
