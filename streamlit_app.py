@@ -50,20 +50,20 @@ Run locally:
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from core import beta, books, data, performance, portfolio, returns, risk, trades
-from core.adapters import github as gh_adapter
 from core.config import (
     ANN_FACTOR,
     DEFAULT_EQUITY_SIZE,
     DEFAULT_RATES_SIZE,
     TOTAL_COLUMN_NAME,
 )
+from ui import data_manager as dm
 from utils import plotting
 
 # --------------------------------------------------------------------------
@@ -77,26 +77,9 @@ load_trades_csv = st.cache_data(data.load_trades, show_spinner=False)
 load_books_csv = st.cache_data(books.load_books_csv, show_spinner=False)
 
 
-# --------------------------------------------------------------------------
-# GitHub quick-load
-# --------------------------------------------------------------------------
-# Repo / URL constants and the raw-file fetcher live in
-# `core.adapters.github`; the Streamlit-side cache wrapper stays here
-# so core/ has no Streamlit dependency.
-GITHUB_REPO_URL = gh_adapter.GITHUB_REPO_URL
-GITHUB_RAW_BASE = gh_adapter.GITHUB_RAW_BASE
-GITHUB_FILES = gh_adapter.GITHUB_FILES
-
-fetch_github_file = st.cache_data(show_spinner=False)(gh_adapter.fetch_github_file)
-
-
-def _bytes_for(uploader_value, gh_key: str) -> Optional[bytes]:
-    """Return file bytes from a manual uploader if present, else from
-    the GitHub-fetched copy in session state. Manual uploads always win
-    so the user can override individual files after a GitHub pull."""
-    if uploader_value is not None:
-        return uploader_value.getvalue()
-    return st.session_state.get(gh_key)
+# GitHub repo constants and the raw-file fetcher live in
+# `core.adapters.github`; the Data Manager dialog (`ui.data_manager`)
+# owns the cached wrapper and the fetch flow.
 
 
 # --------------------------------------------------------------------------
@@ -174,123 +157,54 @@ def _refresh_strategy_registry(library: Dict[str, pd.DataFrame]) -> list[str]:
 
 
 # --------------------------------------------------------------------------
-# Sidebar — inputs
+# Data Manager — modal ingestion + status
 # --------------------------------------------------------------------------
-st.sidebar.header("Inputs")
-st.sidebar.caption("Upload CSVs, or pull them straight from GitHub.")
+# All ingestion (GitHub, upload, Yahoo) lives in a single modal opened
+# from the header. Each of the four slots (eq / rates / trades / books)
+# is written to session state by the manager; downstream code reads
+# exclusively through `dm.get_bytes(...)`.
+dm.init_state()
+dm.render_dialog()
 
-# ---- GitHub quick-load -----------------------------------------------------
-st.sidebar.markdown(
-    f"**GitHub source** — [`jeangaga/TAA2/input`]({GITHUB_REPO_URL})"
-)
-gh_cols = st.sidebar.columns([3, 2])
-if gh_cols[0].button(
-    "Load all from GitHub",
-    help=(
-        "Fetch TAAEQDaily.csv, TAAratesDaily.csv, TradesPAT.csv and "
-        "Books.csv directly from the public repo. Manual uploads below "
-        "will still override these."
-    ),
-    use_container_width=True,
-):
-    ok, fail = [], []
-    for key, fname in GITHUB_FILES.items():
-        url = f"{GITHUB_RAW_BASE}/{fname}"
-        try:
-            st.session_state[f"gh_{key}"] = fetch_github_file(url)
-            ok.append(fname)
-        except Exception as e:
-            fail.append(f"{fname} ({e})")
-    if ok:
-        st.sidebar.success("Loaded from GitHub: " + ", ".join(ok))
-    if fail:
-        st.sidebar.error("Failed: " + "; ".join(fail))
-    # Auto-import Books.csv if it came through.
-    books_bytes = st.session_state.get("gh_books")
-    if books_bytes:
+# ---- Resolve bytes from the Data Manager slots ----------------------------
+eq_bytes = dm.get_bytes("eq")
+rate_bytes = dm.get_bytes("rates")
+trades_bytes = dm.get_bytes("trades")
+books_bytes = dm.get_bytes("books")
+
+# Auto-import Books.csv whenever new bytes land in the books slot so the
+# user never needs a separate "Import" click. Hash-guarded so unchanged
+# bytes on subsequent reruns are a no-op.
+if books_bytes:
+    _books_hash = hash(books_bytes)
+    if st.session_state.get("_last_imported_books_hash") != _books_hash:
         try:
             imported = load_books_csv(books_bytes)
             overwrites = sorted(
                 set(imported.keys()) & set(st.session_state.imported_books.keys())
             )
             st.session_state.imported_books.update(imported)
+            st.session_state["_last_imported_books_hash"] = _books_hash
             if overwrites:
-                st.sidebar.warning(
-                    "Overwrote existing imported book(s): "
-                    + ", ".join(overwrites)
+                st.toast(
+                    "Overwrote imported book(s): " + ", ".join(overwrites),
+                    icon="⚠️",
                 )
-        except Exception as e:
-            st.sidebar.error(f"Books.csv imported but could not be parsed: {e}")
-    st.rerun()
-
-if gh_cols[1].button(
-    "Clear GitHub",
-    help="Forget the GitHub-fetched bytes (manual uploads are unaffected).",
-    use_container_width=True,
-):
-    for key in GITHUB_FILES:
-        st.session_state.pop(f"gh_{key}", None)
-    st.rerun()
-
-# Show which files are currently held from GitHub, so the user can tell
-# the GitHub path from the manual path at a glance.
-gh_loaded = [fn for k, fn in GITHUB_FILES.items() if st.session_state.get(f"gh_{k}")]
-if gh_loaded:
-    st.sidebar.caption("From GitHub: " + ", ".join(gh_loaded))
-
-st.sidebar.divider()
-st.sidebar.subheader("Manual upload (overrides GitHub)")
-
-eq_file = st.sidebar.file_uploader("TAAEQDaily.csv (prices)", type=["csv"])
-rate_file = st.sidebar.file_uploader("TAAratesDaily.csv (yields)", type=["csv"])
-trades_file = st.sidebar.file_uploader(
-    "Trades.csv (official current book)",
-    type=["csv"],
-    help="Live blotter — used to derive the official `Current` book.",
-)
-
-st.sidebar.divider()
-st.sidebar.subheader("Books library")
-st.sidebar.caption("Optional — alternative books / saved scenarios.")
-books_file = st.sidebar.file_uploader(
-    "Books.csv (alternative books)",
-    type=["csv"],
-    help=(
-        "Each row belongs to a named book via the `BookName` column. "
-        "Use ISO date format YYYY-MM-DD."
-    ),
-    key="books_uploader",
-)
-if books_file is not None and st.sidebar.button("Import Books.csv"):
-    try:
-        imported = load_books_csv(books_file.getvalue())
-        overwrites = sorted(
-            set(imported.keys()) & set(st.session_state.imported_books.keys())
-        )
-        st.session_state.imported_books.update(imported)
-        st.sidebar.success(
-            f"Imported {len(imported)} book(s): " + ", ".join(imported.keys())
-        )
-        if overwrites:
-            st.sidebar.warning(
-                "Overwrote existing imported book(s): " + ", ".join(overwrites)
-            )
-    except Exception as e:
-        st.sidebar.error(f"Failed to import Books.csv: {e}")
-
-# ---- Resolve final bytes (manual overrides GitHub) ------------------------
-eq_bytes = _bytes_for(eq_file, "gh_eq")
-rate_bytes = _bytes_for(rate_file, "gh_rates")
-trades_bytes = _bytes_for(trades_file, "gh_trades")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Books.csv loaded but could not be parsed: {e}")
 
 if not (eq_bytes and rate_bytes and trades_bytes):
     st.title("TAA Trade Book")
+    hdr = st.columns([4, 1])
+    hdr[0].caption(dm.render_status_line())
+    if hdr[1].button("⚙ Data Manager", type="primary", key="dm_open_empty"):
+        dm.open_data_manager()
+        st.rerun()
     st.info(
-        "Upload **prices**, **yields** and **Trades.csv** in the left "
-        "sidebar, or click **Load all from GitHub** to pull them from "
-        "`jeangaga/TAA2`.\n\n"
-        "Optionally upload **Books.csv** to load alternative / saved "
-        "books for comparison."
+        "Load **Prices**, **Rates** and **Trades** to get started — click "
+        "**⚙ Data Manager** in the header to pull from GitHub, upload "
+        "files, or import from Yahoo Finance. **Books** is optional "
+        "(alternative / saved books)."
     )
     st.stop()
 
@@ -405,9 +319,17 @@ working_book = library[working_book_name]
 
 
 # --------------------------------------------------------------------------
-# Header
+# Header — title + data status/manager row, then metrics
 # --------------------------------------------------------------------------
 st.title("TAA Trade Book")
+
+hdr_pill, hdr_line, hdr_btn = st.columns([2, 6, 2])
+hdr_pill.markdown(f"**{dm.render_status_pill()}**")
+hdr_line.caption(dm.render_status_line())
+if hdr_btn.button("⚙ Data Manager", use_container_width=True, key="dm_open_header"):
+    dm.open_data_manager()
+    st.rerun()
+
 top_cols = st.columns(6)
 top_cols[0].metric("As-of date", str(as_of_ts.date()))
 top_cols[1].metric("Open trades", len(trades_open))
@@ -2409,6 +2331,19 @@ with tabs[6]:
 # 8. Data quality
 # --------------------------------------------------------------------------
 with tabs[7]:
+    st.subheader("Market data — sources & coverage")
+    st.caption(
+        "One row per data slot. Source, coverage window and missing-value "
+        "share are computed from the last import; use the ⚙ Data Manager "
+        "in the header to reload from GitHub / upload / Yahoo."
+    )
+    st.dataframe(
+        dm.market_data_summary(asset_returns),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.divider()
+
     st.subheader("Trade-book validation")
     if len(trades_bad) > 0:
         st.warning(f"{len(trades_bad)} trade rows were rejected for bad data "
