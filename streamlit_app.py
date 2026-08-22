@@ -500,7 +500,11 @@ with tabs[1]:
 # (typically an FX pair) shows up here as a red banner instead of a
 # null sleeve buried in Performance / Risk.
 with tabs[2]:
-    market_tab.render(eq_prices, rates_levels)
+    market_tab.render(
+        eq_prices, rates_levels,
+        ohlc_eq=dm.get_ohlc("eq"),
+        ohlc_rates=dm.get_ohlc("rates"),
+    )
 
 
 # --------------------------------------------------------------------------
