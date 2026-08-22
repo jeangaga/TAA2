@@ -31,20 +31,55 @@ def _import_yfinance():
     return yf
 
 
+OHLC_FIELDS = ("Open", "High", "Low", "Close", "Volume")
+
+
 def _empty_ohlc() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    return pd.DataFrame(columns=list(OHLC_FIELDS))
+
+
+def _flatten_multiindex(raw: pd.DataFrame) -> pd.DataFrame:
+    """yfinance returns a MultiIndex whose level ordering varies by version.
+
+    Newer ``yf.download(...)`` puts the OHLC field on level 0 (``Close``,
+    ``Open``, …) with the ticker on level 1; older versions put the
+    ticker on level 0 with the field on level 1. Pick whichever level
+    actually contains ``Close`` so both variants work.
+    """
+    if not isinstance(raw.columns, pd.MultiIndex):
+        return raw
+    for lvl in range(raw.columns.nlevels):
+        values = list(raw.columns.get_level_values(lvl))
+        if "Close" in values:
+            out = raw.copy()
+            out.columns = values
+            return out
+    # No level looks OHLC-shaped — fall back to flattening level 0 and
+    # letting `_normalise_ohlc` return an empty frame.
+    out = raw.copy()
+    out.columns = list(raw.columns.get_level_values(0))
+    return out
 
 
 def _normalise_ohlc(raw: pd.DataFrame) -> pd.DataFrame:
     """Slice down to Open/High/Low/Close/Volume, drop empty rows, sort."""
     if raw is None or raw.empty:
         return _empty_ohlc()
-    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in raw.columns]
-    df = raw[cols].copy()
+    df = _flatten_multiindex(raw)
+    if "Close" not in df.columns:
+        return _empty_ohlc()
+    cols = [c for c in OHLC_FIELDS if c in df.columns]
+    df = df[cols].copy()
     if "Volume" not in df.columns:
         df["Volume"] = pd.NA
-    df = df[["Open", "High", "Low", "Close", "Volume"]]
-    df.index = pd.to_datetime(df.index).tz_localize(None)
+    # Duplicate column labels can appear when yfinance emits both a
+    # single-level and a MultiIndex flattened view (rare, but crashes
+    # the reindex below with `cannot reindex on an axis with duplicates`).
+    df = df.loc[:, ~df.columns.duplicated()]
+    df = df.reindex(columns=list(OHLC_FIELDS))
+    df.index = pd.to_datetime(df.index)
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
     df.index.name = "Date"
     df = df.dropna(subset=["Close"]).sort_index()
     return df
@@ -58,25 +93,40 @@ def download_one(
     name: str | None = None,
     asset_class: str = "",
 ) -> MarketSeries:
-    """Download one Yahoo ticker; return a MarketSeries (never raises for empties)."""
+    """Download one Yahoo ticker; return a MarketSeries (never raises for empties).
+
+    Uses ``Ticker.history()`` in preference to ``yf.download()``: history
+    returns a plain single-level column DataFrame, sidestepping the
+    MultiIndex flattening dance that trips FX pairs like ``EURUSD=X``
+    in current yfinance releases. Falls back to ``yf.download`` if
+    history returns nothing.
+    """
     if period not in VALID_PERIODS:
         raise ValueError(f"invalid period {period!r}; expected one of {sorted(VALID_PERIODS)}")
     if interval not in VALID_INTERVALS:
         raise ValueError(f"invalid interval {interval!r}; expected one of {sorted(VALID_INTERVALS)}")
 
     yf = _import_yfinance()
-    raw = yf.download(
-        ticker,
-        period=period,
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
-    # yfinance 0.2+ returns a MultiIndex when passed a single ticker in some
-    # code paths; flatten to plain columns for a stable downstream shape.
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
+
+    raw = None
+    try:
+        raw = yf.Ticker(ticker).history(
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+        )
+    except Exception:  # noqa: BLE001
+        raw = None
+
+    if raw is None or raw.empty:
+        raw = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
 
     ohlc = _normalise_ohlc(raw)
     return MarketSeries(
