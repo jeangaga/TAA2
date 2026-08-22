@@ -56,11 +56,22 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from core import beta, books, data, performance, portfolio, returns, risk, trades
+from core import (
+    asset_registry as reg,
+    beta,
+    books,
+    data,
+    performance,
+    portfolio,
+    returns,
+    risk,
+    trades,
+)
 from core.config import (
     ANN_FACTOR,
     DEFAULT_EQUITY_SIZE,
     DEFAULT_RATES_SIZE,
+    REQUIRED_TRADE_COLUMNS,
     TOTAL_COLUMN_NAME,
 )
 from ui import data_manager as dm
@@ -120,9 +131,28 @@ if "strategy_registry" not in st.session_state:
     st.session_state.strategy_registry: set[str] = set()
 
 
-def _refresh_library(current_book: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """Recompose the library dict from session state."""
-    lib: Dict[str, pd.DataFrame] = {"Current": current_book}
+def _refresh_library(
+    current_book: pd.DataFrame,
+    *,
+    demo_active: bool = False,
+) -> Dict[str, pd.DataFrame]:
+    """Recompose the library dict from session state.
+
+    When ``demo_active`` is True (no real Trades loaded) the ``Current``
+    slot is replaced by an in-memory Demo Book built from the asset
+    registry. Real trades → real ``Current``; the two paths never mix.
+    """
+    lib: Dict[str, pd.DataFrame] = {}
+    if demo_active:
+        try:
+            registry = reg.load_registry()
+            demo_book = books.build_demo_book(registry)
+        except Exception:  # noqa: BLE001
+            demo_book = None
+        if demo_book is not None and len(demo_book) > 0:
+            lib[books.DEMO_BOOK_NAME] = demo_book
+    else:
+        lib["Current"] = current_book
     if st.session_state.scenario_book is not None and len(st.session_state.scenario_book) > 0:
         lib["Scenario (editable)"] = st.session_state.scenario_book
     for name, b in st.session_state.imported_books.items():
@@ -166,6 +196,11 @@ def _refresh_strategy_registry(library: Dict[str, pd.DataFrame]) -> list[str]:
 dm.init_state()
 dm.render_dialog()
 
+# Cold-start convenience: if the user has loaded nothing at all yet, pull
+# the Core universe (SPX / UST 10Y / EUR) from Yahoo so the app is
+# immediately usable. Runs at most once per session; silent on failure.
+dm.autoload_core_if_cold()
+
 # ---- Resolve bytes from the Data Manager slots ----------------------------
 eq_bytes = dm.get_bytes("eq")
 rate_bytes = dm.get_bytes("rates")
@@ -193,7 +228,10 @@ if books_bytes:
         except Exception as e:  # noqa: BLE001
             st.error(f"Books.csv loaded but could not be parsed: {e}")
 
-if not (eq_bytes and rate_bytes and trades_bytes):
+# The app only stops when market data itself is absent. When Trades are
+# missing but prices+rates are present, the Demo Book takes over so the
+# analytics tabs are usable immediately.
+if not (eq_bytes and rate_bytes):
     st.title("TAA Trade Book")
     hdr = st.columns([4, 1])
     hdr[0].caption(dm.render_status_line())
@@ -201,26 +239,29 @@ if not (eq_bytes and rate_bytes and trades_bytes):
         dm.open_data_manager()
         st.rerun()
     _missing_labels = [
-        label for key, label in (("eq", "Prices"), ("rates", "Rates"), ("trades", "Trades"))
+        label for key, label in (("eq", "Prices"), ("rates", "Rates"))
         if dm.get_bytes(key) is None
     ]
-    _missing_str = ", ".join(f"**{m}**" for m in _missing_labels)
-    _yahoo_note = ""
-    if _missing_labels == ["Trades"]:
-        _yahoo_note = (
-            " Yahoo Finance has market data only — load Trades from "
-            "**GitHub** or **File Upload** in the Data Manager."
-        )
     st.info(
-        f"Still missing: {_missing_str}. Click **⚙ Data Manager** in "
-        f"the header to load them.{_yahoo_note}"
+        f"Market data missing: {', '.join(f'**{m}**' for m in _missing_labels)}. "
+        "Open **⚙ Data Manager** to load from GitHub, upload files, or pull "
+        "from Yahoo Finance. The core universe (SPX · UST 10Y · EUR) is "
+        "enough to activate the Demo portfolio."
     )
     st.stop()
 
+# Load prices / rates unconditionally; load trades only if they exist,
+# otherwise fabricate an empty scaffolding so downstream code doesn't
+# branch on Trades presence at every step.
 try:
     eq_prices = load_price_data(eq_bytes)
     rates_levels = load_rate_data(rate_bytes)
-    trades_raw = load_trades_csv(trades_bytes)
+    if trades_bytes:
+        trades_raw = load_trades_csv(trades_bytes)
+        demo_active = False
+    else:
+        trades_raw = pd.DataFrame(columns=REQUIRED_TRADE_COLUMNS)
+        demo_active = True
 except Exception as e:
     st.error(f"Failed to load inputs: {e}")
     st.stop()
@@ -267,7 +308,8 @@ trades_open = trades.open_as_of_date(trades_clean, as_of_ts)
 # Live book — official `Current` book derived from open trades
 # --------------------------------------------------------------------------
 current_book = books.trades_to_live_book(trades_open, book_name="Current")
-library = _refresh_library(current_book)
+library = _refresh_library(current_book, demo_active=demo_active)
+_default_working_book = books.DEMO_BOOK_NAME if demo_active else "Current"
 # Strategy registry tracks every label we've ever seen in any book in
 # this session. It is the universe the scenario's Add Position form and
 # editor grid draw from, so pruning a strategy from the scenario never
@@ -293,13 +335,20 @@ def _sync_working_book_from(widget_key: str) -> None:
     st.session_state["working_book_name"] = st.session_state[widget_key]
 
 
-def _ensure_working_book(library_keys: list) -> str:
-    """Return a valid shared `working_book_name`, always persisting it."""
-    current = st.session_state.get("working_book_name", "Current")
+def _ensure_working_book(library_keys: list, default: str = "Current") -> str:
+    """Return a valid shared `working_book_name`, always persisting it.
+
+    ``default`` names the book selected on a fresh session — this is
+    ``"Current"`` when real trades are loaded, and
+    ``books.DEMO_BOOK_NAME`` when the Demo Book is active. It also
+    wins if a previously-selected book has since disappeared from the
+    library (e.g. user cleared their Trades slot).
+    """
+    current = st.session_state.get("working_book_name", default)
     if current not in library_keys:
-        current = library_keys[0] if library_keys else "Current"
-    # Always write back — on a fresh session the key doesn't exist yet,
-    # and the sidebar/tab code that follows will raise KeyError otherwise.
+        current = default if default in library_keys else (
+            library_keys[0] if library_keys else default
+        )
     st.session_state["working_book_name"] = current
     return current
 
@@ -308,7 +357,7 @@ st.sidebar.divider()
 st.sidebar.subheader("Working book")
 st.sidebar.caption("Drives the Performance and Risk tabs.")
 _book_names = list(library.keys())
-_shared = _ensure_working_book(_book_names)
+_shared = _ensure_working_book(_book_names, default=_default_working_book)
 # Pre-sync the sidebar widget state to the shared key before instantiation.
 st.session_state["wb_picker__sidebar"] = _shared
 st.sidebar.selectbox(
@@ -328,16 +377,36 @@ working_book = library[working_book_name]
 
 
 # --------------------------------------------------------------------------
-# Header — title + data status/manager row, then metrics
+# Header — title + data status/manager row, then metrics + demo banner
 # --------------------------------------------------------------------------
 st.title("TAA Trade Book")
 
+# Extend the standard "Data: ✓ Ready" pill with a Book indicator so the
+# reader can tell at a glance which book is currently active — demo or real.
+_pill_text = dm.render_status_pill()
+if demo_active:
+    _pill_text = f"{_pill_text} · Book: DEMO"
+else:
+    _pill_text = f"{_pill_text} · Book: {working_book_name}"
+
 hdr_pill, hdr_line, hdr_btn = st.columns([2, 6, 2])
-hdr_pill.markdown(f"**{dm.render_status_pill()}**")
+hdr_pill.markdown(f"**{_pill_text}**")
 hdr_line.caption(dm.render_status_line())
 if hdr_btn.button("⚙ Data Manager", use_container_width=True, key="dm_open_header"):
     dm.open_data_manager()
     st.rerun()
+
+# Persistent banner when the Demo Book is active — replaces the old
+# "missing Trades" warning with an explanation that reads as information,
+# not error, so the user knows the analytics they are looking at are the
+# demo's, not a real portfolio.
+if demo_active:
+    _demo_summary = books.demo_book_summary(library.get(books.DEMO_BOOK_NAME))
+    st.info(
+        f"**Demo portfolio active** — {_demo_summary}. Market data are "
+        "loaded from the current source(s). Load a Trades file in "
+        "**⚙ Data Manager** to replace the demo with your own book."
+    )
 
 top_cols = st.columns(6)
 top_cols[0].metric("As-of date", str(as_of_ts.date()))
@@ -1238,7 +1307,7 @@ with tabs[3]:
 # Re-refresh library + strategy registry after potential scenario
 # edits / snapshots / Add Position / Apply scope. The registry is
 # monotonic per session — pruned labels stay pickable.
-library = _refresh_library(current_book)
+library = _refresh_library(current_book, demo_active=demo_active)
 strategy_registry_sorted = _refresh_strategy_registry(library)
 
 
@@ -1454,7 +1523,7 @@ with tabs[2]:
 # --------------------------------------------------------------------------
 def _working_book_picker_block(location_key: str, library: Dict[str, pd.DataFrame]) -> str:
     library_keys = list(library.keys())
-    current = _ensure_working_book(library_keys)
+    current = _ensure_working_book(library_keys, default=_default_working_book)
     wkey = f"wb_picker__{location_key}"
     # Pre-sync widget state from the shared key. Legal *before* the
     # widget is instantiated, which is why this isn't done in a callback.
