@@ -194,7 +194,6 @@ def _refresh_strategy_registry(library: Dict[str, pd.DataFrame]) -> list[str]:
 # is written to session state by the manager; downstream code reads
 # exclusively through `dm.get_bytes(...)`.
 dm.init_state()
-dm.render_dialog()
 
 # Cold-start convenience: if the user has loaded nothing at all yet, pull
 # the Core universe (SPX / UST 10Y / EUR) from Yahoo so the app is
@@ -235,9 +234,12 @@ if not (eq_bytes and rate_bytes):
     st.title("TAA Trade Book")
     hdr = st.columns([4, 1])
     hdr[0].caption(dm.render_status_line())
-    if hdr[1].button("⚙ Data Manager", type="primary", key="dm_open_empty"):
-        dm.open_data_manager()
-        st.rerun()
+    dm.render_dialog_button(
+        key="dm_open_empty",
+        container=hdr[1],
+        use_container_width=True,
+        button_type="primary",
+    )
     _missing_labels = [
         label for key, label in (("eq", "Prices"), ("rates", "Rates"))
         if dm.get_bytes(key) is None
@@ -265,6 +267,10 @@ try:
 except Exception as e:
     st.error(f"Failed to load inputs: {e}")
     st.stop()
+
+# Let the Data Manager relabel its Trades row ("— not loaded (Scenario
+# draft is active)") when the demo is standing in.
+dm.set_demo_active(demo_active)
 
 
 # --------------------------------------------------------------------------
@@ -382,19 +388,17 @@ working_book = library[working_book_name]
 st.title("TAA Trade Book")
 
 # Extend the standard "Data: ✓ Ready" pill with a Book indicator so the
-# reader can tell at a glance which book is currently active — demo or real.
-_pill_text = dm.render_status_pill()
-if demo_active:
-    _pill_text = f"{_pill_text} · Book: DEMO"
-else:
-    _pill_text = f"{_pill_text} · Book: {working_book_name}"
+# reader can tell at a glance which book is currently active.
+_pill_text = f"{dm.render_status_pill()} · Book: {working_book_name}"
 
 hdr_pill, hdr_line, hdr_btn = st.columns([2, 6, 2])
 hdr_pill.markdown(f"**{_pill_text}**")
 hdr_line.caption(dm.render_status_line())
-if hdr_btn.button("⚙ Data Manager", use_container_width=True, key="dm_open_header"):
-    dm.open_data_manager()
-    st.rerun()
+dm.render_dialog_button(
+    key="dm_open_header",
+    container=hdr_btn,
+    use_container_width=True,
+)
 
 # Persistent banner when the Demo Book is active — replaces the old
 # "missing Trades" warning with an explanation that reads as information,
@@ -403,9 +407,9 @@ if hdr_btn.button("⚙ Data Manager", use_container_width=True, key="dm_open_hea
 if demo_active:
     _demo_summary = books.demo_book_summary(library.get(books.DEMO_BOOK_NAME))
     st.info(
-        f"**Demo portfolio active** — {_demo_summary}. Market data are "
-        "loaded from the current source(s). Load a Trades file in "
-        "**⚙ Data Manager** to replace the demo with your own book."
+        f"**{books.DEMO_BOOK_NAME} active** — {_demo_summary}. Market data "
+        "are loaded from the current source(s). Load a Trades file in "
+        "**⚙ Data Manager** to replace the draft with your own book."
     )
 
 top_cols = st.columns(6)
