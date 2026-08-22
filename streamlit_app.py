@@ -50,7 +50,6 @@ Run locally:
 """
 from __future__ import annotations
 
-import urllib.request
 from typing import Dict, Optional
 
 import numpy as np
@@ -58,6 +57,7 @@ import pandas as pd
 import streamlit as st
 
 from core import beta, books, data, performance, portfolio, returns, risk, trades
+from core.adapters import github as gh_adapter
 from core.config import (
     ANN_FACTOR,
     DEFAULT_EQUITY_SIZE,
@@ -80,25 +80,14 @@ load_books_csv = st.cache_data(books.load_books_csv, show_spinner=False)
 # --------------------------------------------------------------------------
 # GitHub quick-load
 # --------------------------------------------------------------------------
-# Single source of truth — change this constant if the repo / branch /
-# folder layout moves. Files are fetched from the raw.githubusercontent
-# mirror so we get plain bytes instead of HTML.
-GITHUB_REPO_URL = "https://github.com/jeangaga/TAA2/tree/main/input"
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/jeangaga/TAA2/main/input"
-GITHUB_FILES = {
-    "eq": "TAAEQDaily.csv",
-    "rates": "TAAratesDaily.csv",
-    "trades": "TradesPAT.csv",
-    "books": "Books.csv",
-}
+# Repo / URL constants and the raw-file fetcher live in
+# `core.adapters.github`; the Streamlit-side cache wrapper stays here
+# so core/ has no Streamlit dependency.
+GITHUB_REPO_URL = gh_adapter.GITHUB_REPO_URL
+GITHUB_RAW_BASE = gh_adapter.GITHUB_RAW_BASE
+GITHUB_FILES = gh_adapter.GITHUB_FILES
 
-
-@st.cache_data(show_spinner=False)
-def fetch_github_file(url: str) -> bytes:
-    """Fetch a raw file from GitHub. Cached so repeated reruns are free."""
-    req = urllib.request.Request(url, headers={"User-Agent": "TAA2-streamlit"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return r.read()
+fetch_github_file = st.cache_data(show_spinner=False)(gh_adapter.fetch_github_file)
 
 
 def _bytes_for(uploader_value, gh_key: str) -> Optional[bytes]:
