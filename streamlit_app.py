@@ -132,6 +132,23 @@ if "strategy_registry" not in st.session_state:
     st.session_state.strategy_registry: set[str] = set()
 
 
+def _canon_scenario(draft: pd.DataFrame, book_name: str = "Scenario") -> pd.DataFrame:
+    """Canonicalise a scenario draft while preserving Size=0 placeholder rows.
+
+    The Editable Scenario tab is the one place a book legitimately
+    contains rows the user has not sized yet — that's the whole point
+    of the Market Universe seed. The engine already treats
+    ``Size == 0`` as "contributes nothing", so keeping them here
+    doesn't affect Performance / Risk / Book Comparison; it only
+    keeps the row visible in the editor so the user can size it.
+
+    Snapshot save + export paths call ``books.canonicalize_book``
+    directly with the default ``keep_zero_size=False`` so committed
+    artefacts drop unsized template rows.
+    """
+    return books.canonicalize_book(draft, book_name=book_name, keep_zero_size=True)
+
+
 def _refresh_library(
     current_book: pd.DataFrame,
     *,
@@ -588,7 +605,7 @@ with tabs[4]:
     ):
         src = library[seed_from_name].copy()
         src["BookName"] = "Scenario"
-        st.session_state.scenario_book = books.canonicalize_book(src, book_name="Scenario")
+        st.session_state.scenario_book = _canon_scenario(src)
         _reset_scenario_editor_state()
         _set_scenario_as_working()
         st.toast(f"Seeded scenario from **{seed_from_name}** — working book set to Scenario.")
@@ -605,10 +622,91 @@ with tabs[4]:
             st.session_state["working_book_name"] = "Current"
         st.rerun()
 
+    # ---- Market Universe seed -----------------------------------------
+    # Alternative seed path: build a flat, editable scenario with one row
+    # per asset in the loaded market universe (Size = 0). Zero rows
+    # remain visible in the editor so the user can size them one by one;
+    # the engine ignores Size=0 sleeves so Performance / Risk / Book
+    # Comparison are unaffected until the user actually sizes a row.
+    st.markdown(
+        "**Or seed as a Market Universe template** — one `Strategy = Asset` "
+        "row per loaded asset, all at Size 0. Edit only the sizes you want."
+    )
+    try:
+        _mu_registry = reg.load_registry()
+    except Exception:  # noqa: BLE001
+        _mu_registry = None
+    _loaded_prices = list(eq_prices.columns) if eq_prices is not None else []
+    _loaded_rates = list(rates_levels.columns) if rates_levels is not None else []
+    _mu_all = sorted(set(_loaded_prices) | set(_loaded_rates))
+
+    def _universe_for(scope: str) -> list[str]:
+        if scope == "All loaded" or _mu_registry is None or _mu_registry.empty:
+            return _mu_all
+        fam_map = reg.by_family(_mu_registry)
+        return sorted([n for n in fam_map.get(scope, []) if n in _mu_all])
+
+    _MU_SCOPES = ["All loaded", "FX", "Equity Indices", "Rates"]
+    mu_scope_col, mu_seed_col, mu_sync_col, mu_note_col = st.columns([2, 1, 1, 2])
+    mu_scope = mu_scope_col.selectbox(
+        "Universe scope",
+        _MU_SCOPES,
+        index=0,
+        key="scenario_mu_scope",
+        help="All loaded uses every column in the Prices + Rates slots; family filters use the Asset Registry taxonomy.",
+    )
+    _mu_universe = _universe_for(mu_scope)
+    mu_note_col.caption(
+        f"{len(_mu_universe)} asset(s) will be seeded" if _mu_universe
+        else "No assets match this scope — load some market data first."
+    )
+    if mu_seed_col.button(
+        "Seed universe",
+        key="scenario_mu_seed",
+        disabled=not _mu_universe,
+        help=(
+            "Overwrite the scenario with one Strategy=Asset row per asset "
+            "at Size 0. Zero rows are kept visible for you to size."
+        ),
+        use_container_width=True,
+    ):
+        st.session_state.scenario_book = books.build_market_universe_book(
+            _mu_universe, registry=_mu_registry, book_name="Scenario",
+        )
+        _reset_scenario_editor_state()
+        _set_scenario_as_working()
+        st.toast(
+            f"Seeded scenario from Market Universe · {mu_scope} · "
+            f"{len(_mu_universe)} rows at Size 0."
+        )
+        st.rerun()
+    if mu_sync_col.button(
+        "Sync universe",
+        key="scenario_mu_sync",
+        disabled=st.session_state.scenario_book is None or not _mu_universe,
+        help=(
+            "Add any newly loaded assets as Size=0 rows. Existing rows "
+            "and sizes are preserved; nothing is removed."
+        ),
+        use_container_width=True,
+    ):
+        synced = books.sync_book_with_universe(
+            st.session_state.scenario_book, _mu_universe, registry=_mu_registry,
+        )
+        added = len(synced) - len(st.session_state.scenario_book)
+        # Skip canonicalize here — sync_book_with_universe already emits
+        # canonical rows and we don't want to drop zero-size templates.
+        synced["BookName"] = "Scenario"
+        st.session_state.scenario_book = synced
+        _reset_scenario_editor_state()
+        st.toast(f"Added {added} new asset(s) at Size 0 · scope: {mu_scope}.")
+        st.rerun()
+
     if st.session_state.scenario_book is None:
         st.info(
             "No scenario book yet. Pick a source above and click **Seed** "
-            "to copy it into the editable layer."
+            "to copy it into the editable layer, or use **Seed universe** "
+            "for a blank template from the loaded market data."
         )
     else:
         # ----------------------------------------------------------------
@@ -647,7 +745,7 @@ with tabs[4]:
         ):
             keep_set = set(keep_strats)
             pruned = sb[sb["Strategy"].astype(str).isin(keep_set)].copy()
-            st.session_state.scenario_book = books.canonicalize_book(pruned, book_name="Scenario")
+            st.session_state.scenario_book = _canon_scenario(pruned)
             _reset_scenario_editor_state()
             removed = sorted(set(scenario_strats) - keep_set)
             st.toast(f"Pruned strategy(ies): {', '.join(removed) if removed else '—'}")
@@ -724,9 +822,7 @@ with tabs[4]:
         # canonicalize_book so we don't carry them forward here.
         if "AssetClass" not in edited_for_store.columns:
             edited_for_store["AssetClass"] = ""
-        st.session_state.scenario_book = books.canonicalize_book(
-            edited_for_store, book_name="Scenario",
-        )
+        st.session_state.scenario_book = _canon_scenario(edited_for_store)
 
         # ---- Scenario risk summary ------------------------------------
         # Inline risk read-out for the *scenario* itself, independent of
@@ -982,9 +1078,7 @@ with tabs[4]:
                     [st.session_state.scenario_book, pd.DataFrame(new_rows)],
                     ignore_index=True, sort=False,
                 )
-                st.session_state.scenario_book = books.canonicalize_book(
-                    combined, book_name="Scenario",
-                )
+                st.session_state.scenario_book = _canon_scenario(combined)
                 st.session_state.strategy_registry.add(bulk_strat)
                 _reset_scenario_editor_state()
                 if unclassified:
@@ -1102,9 +1196,7 @@ with tabs[4]:
                     [st.session_state.scenario_book, new_row],
                     ignore_index=True, sort=False,
                 )
-                st.session_state.scenario_book = books.canonicalize_book(
-                    combined, book_name="Scenario",
-                )
+                st.session_state.scenario_book = _canon_scenario(combined)
                 # Register the label explicitly — the registry rebuild
                 # at the end of the script run will also pick it up from
                 # scenario_book, but writing it here makes the intent
@@ -1151,9 +1243,7 @@ with tabs[4]:
                 scaled = books.scale_whole_book(
                     st.session_state.scenario_book, sw_factor, new_name="Scenario",
                 )
-                st.session_state.scenario_book = books.canonicalize_book(
-                    scaled, book_name="Scenario",
-                )
+                st.session_state.scenario_book = _canon_scenario(scaled)
                 _reset_scenario_editor_state()
                 st.toast(f"Whole scenario scaled by {sw_factor:.2f}x.")
                 st.rerun()
@@ -1184,9 +1274,7 @@ with tabs[4]:
                     st.session_state.scenario_book, sel_picked, ss_factor,
                     new_name="Scenario",
                 )
-                st.session_state.scenario_book = books.canonicalize_book(
-                    scaled, book_name="Scenario",
-                )
+                st.session_state.scenario_book = _canon_scenario(scaled)
                 _reset_scenario_editor_state()
                 st.toast(
                     f"Scaled {len(sel_picked)} strategy(ies) by {ss_factor:.2f}x."
@@ -1211,9 +1299,7 @@ with tabs[4]:
                     st.session_state.scenario_book, asset_returns,
                     target_vol=target, new_name="Scenario",
                 )
-                st.session_state.scenario_book = books.canonicalize_book(
-                    rebalanced, book_name="Scenario",
-                )
+                st.session_state.scenario_book = _canon_scenario(rebalanced)
                 _reset_scenario_editor_state()
                 st.toast("Equal-vol rebalance applied to scenario.")
                 st.rerun()
@@ -1398,7 +1484,7 @@ with tabs[3]:
         ):
             src = insp_book.copy()
             src["BookName"] = "Scenario"
-            st.session_state.scenario_book = books.canonicalize_book(src, book_name="Scenario")
+            st.session_state.scenario_book = _canon_scenario(src)
             # Reset the editor's internal diff state so it shows the new
             # seed cleanly instead of stacking old edits on top. We do NOT
             # touch `scenario_seed_source` here because that key is bound
