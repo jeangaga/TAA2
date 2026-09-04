@@ -101,52 +101,6 @@ def _summary_table(frame: pd.DataFrame, is_rate: bool) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _price_line_chart(series: pd.Series, asset: str, is_rate: bool) -> go.Figure:
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=series.index,
-        y=series.values,
-        mode="lines",
-        name=asset,
-        line=dict(width=2, color="#1f77b4"),
-    ))
-    fig.update_layout(
-        title=f"{asset} — {'Yield level (%)' if is_rate else 'Level'}",
-        height=340,
-        margin=dict(l=40, r=20, t=50, b=30),
-        showlegend=False,
-        xaxis=dict(title=""),
-        yaxis=dict(title=""),
-    )
-    return fig
-
-
-def _daily_bar_chart(series: pd.Series, asset: str, is_rate: bool) -> go.Figure:
-    if is_rate:
-        changes = series.diff().dropna() * 100.0  # bp
-        y_title = "Daily Δ (bp)"
-    else:
-        changes = series.pct_change().dropna() * 100.0  # %
-        y_title = "Daily return (%)"
-    colors = ["#2ca02c" if v >= 0 else "#d62728" for v in changes.values]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=changes.index,
-        y=changes.values,
-        marker_color=colors,
-        name=asset,
-    ))
-    fig.update_layout(
-        title=f"{asset} — {y_title}",
-        height=340,
-        margin=dict(l=40, r=20, t=50, b=30),
-        showlegend=False,
-        xaxis=dict(title=""),
-        yaxis=dict(title=""),
-    )
-    return fig
-
-
 def render(
     eq_prices: pd.DataFrame,
     rates_levels: pd.DataFrame,
@@ -234,40 +188,311 @@ def render(
         st.info("Nothing to explore — no assets loaded.")
         return
 
-    _render_asset_explorer(eq_prices, rates_levels, combined_cols)
+    _render_asset_explorer(eq_prices, rates_levels, combined_cols, ohlc_eq, ohlc_rates)
     st.divider()
     _render_scan_board(eq_prices, rates_levels, ohlc_eq, ohlc_rates)
+
+
+# --------------------------------------------------------------------------
+# Asset Explorer — Single asset / Compare assets
+# --------------------------------------------------------------------------
+_COMPARE_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f",
+]
 
 
 def _render_asset_explorer(
     eq_prices: pd.DataFrame,
     rates_levels: pd.DataFrame,
     combined_cols: list[str],
+    ohlc_eq: dict,
+    ohlc_rates: dict,
 ) -> None:
-    st.markdown("**Asset explorer**")
+    """Asset Explorer with Single / Compare modes.
+
+    Single asset mode reuses ``_build_technical_chart`` in
+    ``explorer_mode`` so the chart is a full-width analysis view
+    (with all the same options as the Scan Board — Range / Chart /
+    View / MAs / S/R / RSI panel / Daily returns / Large).
+
+    Compare assets mode uses ``_build_compare_chart`` for a clean
+    multi-asset overlay — rebased to 100 by default, no MA/RSI/SR
+    clutter.
+    """
+    st.markdown("### Asset Explorer")
+    mode = st.radio(
+        "Mode",
+        ["Single asset", "Compare assets"],
+        index=0,
+        horizontal=True,
+        key="ae_mode",
+        label_visibility="collapsed",
+    )
+    if mode == "Single asset":
+        _render_explorer_single(
+            eq_prices, rates_levels, combined_cols, ohlc_eq, ohlc_rates,
+        )
+    else:
+        _render_explorer_compare(
+            eq_prices, rates_levels, combined_cols, ohlc_eq, ohlc_rates,
+        )
+
+
+def _resolve_frame(
+    asset: str,
+    eq_prices: pd.DataFrame,
+    rates_levels: pd.DataFrame,
+    ohlc_eq: dict,
+    ohlc_rates: dict,
+) -> tuple[pd.DataFrame | None, bool]:
+    """Return ``(frame, is_rate)`` for a single asset.
+
+    Prefers the OHLC dict (Yahoo-sourced), falls back to a Close-only
+    frame built from the wide close DataFrame. ``frame is None`` when
+    the asset resolves nowhere.
+    """
+    rates_cols = set(map(str, rates_levels.columns)) if rates_levels is not None else set()
+    is_rate = asset in rates_cols
+    ohlc_dict = ohlc_rates if is_rate else ohlc_eq
+    if asset in ohlc_dict and not ohlc_dict[asset].empty:
+        return ohlc_dict[asset], is_rate
+    src = rates_levels if is_rate else eq_prices
+    if src is None or asset not in src.columns:
+        return None, is_rate
+    close = src[asset].dropna()
+    if close.empty:
+        return None, is_rate
+    return close.to_frame(name="Close"), is_rate
+
+
+def _resolve_window(range_label: str, end: pd.Timestamp, custom_key: str) -> pd.Timestamp:
+    if range_label == "Custom":
+        default_start = (end - pd.DateOffset(months=6)).date()
+        custom = st.date_input(
+            "Custom start date", value=default_start, key=custom_key,
+        )
+        return pd.Timestamp(custom)
+    return _range_start(range_label, end)
+
+
+def _render_explorer_single(
+    eq_prices: pd.DataFrame,
+    rates_levels: pd.DataFrame,
+    combined_cols: list[str],
+    ohlc_eq: dict,
+    ohlc_rates: dict,
+) -> None:
+    # Default to a Core asset (SPX / EUR / UST 10Y) when present.
     default_ix = 0
     for pref in ("SPX", "EUR", "UST 10Y"):
         if pref in combined_cols:
             default_ix = combined_cols.index(pref)
             break
     asset = st.selectbox(
-        "Pick an asset to inspect",
-        combined_cols,
-        index=default_ix,
-        key="market_asset_picker",
+        "Asset", combined_cols, index=default_ix, key="ae_single_asset",
     )
-    if not asset:
+
+    # Row 1: Range / Chart / View / MAs
+    r1c1, r1c2, r1c3, r1c4 = st.columns([3, 2, 2, 3])
+    range_label = r1c1.radio(
+        "Range", _RANGE_LABELS, index=1, horizontal=True, key="ae_single_range",
+    )
+    chart_type = r1c2.radio(
+        "Chart", ["Line", "OHLC"], index=0, horizontal=True, key="ae_single_chart",
+    )
+    view_mode = r1c3.radio(
+        "View", ["Level", "Rebased 100"], index=0, horizontal=True, key="ae_single_view",
+        help="OHLC forces Level.",
+    )
+    active_mas = r1c4.multiselect(
+        "Moving averages", _MA_LABELS, default=["MA50"], key="ae_single_mas",
+    )
+
+    # Row 2: option toggles
+    o1, o2, o3, o4 = st.columns(4)
+    show_sr = o1.checkbox("S/R", value=False, key="ae_single_sr")
+    show_rsi = o2.checkbox("RSI panel", value=False, key="ae_single_rsi")
+    show_daily = o3.checkbox("Daily returns", value=False, key="ae_single_daily")
+    large_mode = o4.checkbox("Large", value=False, key="ae_single_large")
+
+    frame, is_rate = _resolve_frame(asset, eq_prices, rates_levels, ohlc_eq, ohlc_rates)
+    if frame is None:
+        st.warning(f"No data for **{asset}**.")
         return
-    rates_cols = set(map(str, rates_levels.columns)) if rates_levels is not None else set()
-    is_rate = asset in rates_cols
-    src_frame = rates_levels if is_rate else eq_prices
-    series = src_frame[asset].dropna()
-    if series.empty:
-        st.warning(f"No data for **{asset}** — column exists but every value is NaN.")
+
+    end = frame.index.max()
+    start = _resolve_window(range_label, end, "ae_single_custom")
+
+    # Compact metrics header (reuses the Scan Board renderer so numbers
+    # match one-for-one between the two views).
+    ctx = _compute_asset_context(frame, start, end, is_rate)
+    if ctx is not None:
+        metrics, supports, resistances = ctx
+        _render_technical_metrics(asset, metrics, supports, resistances, is_rate, show_sr)
+
+    fig = _build_technical_chart(
+        asset, frame, start, end,
+        view_mode, chart_type, active_mas,
+        show_sr, show_rsi, is_rate,
+        large_mode=large_mode,
+        show_daily_returns=show_daily,
+        explorer_mode=True,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def _render_explorer_compare(
+    eq_prices: pd.DataFrame,
+    rates_levels: pd.DataFrame,
+    combined_cols: list[str],
+    ohlc_eq: dict,
+    ohlc_rates: dict,
+) -> None:
+    default_compare = [n for n in ("SPX", "NDX", "NVDA", "AVGO", "MSFT") if n in combined_cols]
+    selected = st.multiselect(
+        "Assets",
+        combined_cols,
+        default=default_compare,
+        key="ae_compare_assets",
+    )
+
+    r1c1, r1c2, r1c3 = st.columns([3, 2, 2])
+    range_label = r1c1.radio(
+        "Range", _RANGE_LABELS, index=1, horizontal=True, key="ae_compare_range",
+    )
+    view_mode = r1c2.radio(
+        "View", ["Rebased 100", "Level"], index=0, horizontal=True, key="ae_compare_view",
+        help="Rebased 100 is the default for cross-asset comparison; Level for same-unit series.",
+    )
+    large_mode = r1c3.checkbox("Large", value=False, key="ae_compare_large")
+
+    if not selected:
+        st.info("Pick at least two assets to compare.")
         return
-    left, right = st.columns(2)
-    left.plotly_chart(_price_line_chart(series, asset, is_rate), use_container_width=True)
-    right.plotly_chart(_daily_bar_chart(series, asset, is_rate), use_container_width=True)
+
+    loaded_rates_list = list(rates_levels.columns) if rates_levels is not None else []
+    frames = _build_frames(
+        selected, loaded_rates_list,
+        eq_prices, rates_levels, ohlc_eq, ohlc_rates,
+    )
+    if not frames:
+        st.info("Selected assets have no data.")
+        return
+
+    end_candidates = [f.index.max() for f, _ in frames.values() if not f.empty]
+    if not end_candidates:
+        st.info("Selected assets have no data.")
+        return
+    end = max(end_candidates)
+    start = _resolve_window(range_label, end, "ae_compare_custom")
+
+    _render_compare_metrics(frames, start, end)
+    fig = _build_compare_chart(frames, start, end, view_mode, large_mode)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+def _render_compare_metrics(
+    frames_by_asset: dict[str, tuple[pd.DataFrame, bool]],
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+) -> None:
+    """Compact ``ASSET +X.YY% · ASSET +Z.ZZ%`` line above the compare chart.
+
+    Rates render in **bp**; everything else in **%**. Colour green up
+    / red down.
+    """
+    parts: list[str] = []
+    for asset, (frame, is_rate) in frames_by_asset.items():
+        close = tech.close_of(frame).dropna()
+        win = close[(close.index >= window_start) & (close.index <= window_end)]
+        if len(win) < 2:
+            continue
+        first = float(win.iloc[0])
+        last = float(win.iloc[-1])
+        if is_rate:
+            perf = (last - first) * 100.0  # bp
+            txt = f"{perf:+.0f}bp"
+        else:
+            if first == 0:
+                continue
+            perf = (last / first - 1) * 100.0
+            txt = f"{perf:+.2f}%"
+        colour = "#2ca02c" if perf >= 0 else "#d62728"
+        parts.append(
+            f"<b>{asset}</b> <span style='color:{colour}'>{txt}</span>"
+        )
+    if parts:
+        st.markdown(
+            "<div style='font-size:0.95rem;line-height:1.6'>"
+            + " &nbsp;·&nbsp; ".join(parts)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
+def _build_compare_chart(
+    frames_by_asset: dict[str, tuple[pd.DataFrame, bool]],
+    window_start: pd.Timestamp,
+    window_end: pd.Timestamp,
+    view_mode: str,
+    large_mode: bool = False,
+) -> go.Figure:
+    """Multi-asset overlay chart. Rebased-100 by default; Level allowed.
+
+    Reuses the Scan-Board chart conventions: right y-axis, shared
+    x-range, no OHLC bottom slider, clean legend on top. No MA / S/R
+    / RSI overlays — those are for Single asset technical analysis;
+    Compare is a relative-performance view.
+    """
+    fig = go.Figure()
+    for i, (asset, (frame, is_rate)) in enumerate(frames_by_asset.items()):
+        close = tech.close_of(frame).dropna()
+        window_mask = (close.index >= window_start) & (close.index <= window_end)
+        win = close[window_mask]
+        if win.empty:
+            continue
+        # Rebase to 100 for price-type assets only. Rates always plot
+        # as raw yield level regardless of the toggle — rebasing a
+        # yield level is not meaningful.
+        if view_mode == "Rebased 100" and not is_rate and float(win.iloc[0]) != 0:
+            y = (win / float(win.iloc[0])) * 100.0
+        else:
+            y = win
+        colour = _COMPARE_PALETTE[i % len(_COMPARE_PALETTE)]
+        fig.add_trace(
+            go.Scatter(
+                x=y.index, y=y.values, mode="lines",
+                line=dict(color=colour, width=1.8),
+                name=asset,
+                hovertemplate=f"{asset} · %{{x|%Y-%m-%d}} · %{{y:.4f}}<extra></extra>",
+            )
+        )
+    height = 620 if large_mode else 460
+    fig.update_layout(
+        height=height,
+        margin=dict(l=20, r=90, t=15, b=30),
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            x=1.0, xanchor="right",
+            font=dict(size=12),
+        ),
+        hovermode="x unified",
+        xaxis_rangeslider_visible=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    fig.update_xaxes(
+        showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+        range=[window_start, window_end],
+        showticklabels=True,
+    )
+    fig.update_yaxes(
+        showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+        side="right",
+    )
+    return fig
 
 
 # --------------------------------------------------------------------------
@@ -411,24 +636,34 @@ def _build_technical_chart(
     show_rsi_panel: bool,
     is_rate: bool,
     large_mode: bool = False,
+    *,
+    show_daily_returns: bool = False,
+    explorer_mode: bool = False,
 ) -> go.Figure:
     """Build one asset's technical chart in chart-first Bloomberg style.
 
+    Shared by both the Scan Board (small stacked rows) and the Asset
+    Explorer's Single-asset mode (large full-width analysis chart).
+    ``explorer_mode`` bumps the pane heights to the taller Asset-
+    Explorer profile; ``show_daily_returns`` composes a third bottom
+    pane with daily % / bp bars.
+
+    Pane composition
+    ----------------
+    Always: main price / OHLC pane (with MA overlays, S/R lines,
+    last-price badge on the right axis).
+    Optional (below, in this order): RSI(14), Daily Returns.
+
     * Line vs OHLC (falls back to Line if OHLC unavailable).
-    * Y-axis on the RIGHT — matches Yahoo / Bloomberg conventions.
-    * Last-price badge on the right axis + faint horizontal line across
-      the plot at the latest close, so the current level is instantly
-      readable regardless of scroll depth.
+    * Y-axis on the RIGHT.
     * MAs computed on the full history so warm-up doesn't truncate.
-    * Optional swing-pivot support/resistance horizontal lines.
-    * Optional RSI(14) sub-panel below the price pane.
-    * Strict explicit ``x-range`` for every asset so vertical alignment
-      across the chart-book is exact.
+    * Strict explicit ``x-range`` so every asset in a stack aligns
+      pixel-for-pixel.
     """
     ohlc_available = tech.has_ohlc(full_frame)
     use_ohlc = chart_type == "OHLC" and ohlc_available and not is_rate
     if use_ohlc:
-        # Normalising OHLC bars is visually misleading; force Level.
+        # Rebasing OHLC bars is visually misleading; force Level.
         view_mode = "Level"
 
     close = tech.close_of(full_frame).dropna()
@@ -447,9 +682,9 @@ def _build_technical_chart(
         fig.update_xaxes(range=[window_start, window_end])
         return fig
 
-    # Scale factor for Normalized view (line charts only)
+    # Scale factor for Rebased-100 view (line charts only)
     scale = 1.0
-    if view_mode == "Normalized" and not use_ohlc and not is_rate:
+    if view_mode == "Rebased 100" and not use_ohlc and not is_rate:
         base = float(win_close.iloc[0])
         if base != 0:
             scale = 100.0 / base
@@ -471,17 +706,55 @@ def _build_technical_chart(
     rsi_series = None
     if show_rsi_panel and len(close) >= 15:
         rsi_series = tech.rsi(close, 14)[window_mask]
+    include_rsi = rsi_series is not None and rsi_series.notna().any()
 
-    two_pane = show_rsi_panel and rsi_series is not None and rsi_series.notna().any()
-    if two_pane:
+    # Daily-returns pane data (bars). Uses window slice — we don't need
+    # warm-up here beyond the first bar of the window.
+    include_daily = show_daily_returns
+    if include_daily:
+        if is_rate:
+            daily_changes = win_close.diff().dropna() * 100.0  # bp
+        else:
+            daily_changes = win_close.pct_change().dropna() * 100.0  # %
+        include_daily = not daily_changes.empty
+    else:
+        daily_changes = None
+
+    # Pane layout — 1 to 3 rows. Explorer mode uses taller panes so the
+    # single-asset view reads like a proper analysis chart, not a scan
+    # sparkline.
+    if explorer_mode:
+        h_main = 600 if large_mode else 460
+        h_sub = 150 if large_mode else 130
+    else:
+        h_main = 420 if large_mode else 340
+        h_sub = 90
+
+    heights: list[int] = [h_main]
+    if include_rsi:
+        heights.append(h_sub)
+    if include_daily:
+        heights.append(h_sub)
+    total_h = sum(heights)
+    n_panels = len(heights)
+
+    if n_panels == 1:
+        fig = go.Figure()
+        price_row: dict = {}
+        rsi_row: dict = {}
+        daily_row: dict = {}
+    else:
+        row_heights = [h / total_h for h in heights]
         fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.78, 0.22], vertical_spacing=0.04,
+            rows=n_panels, cols=1, shared_xaxes=True,
+            row_heights=row_heights, vertical_spacing=0.035,
         )
         price_row = dict(row=1, col=1)
-    else:
-        fig = go.Figure()
-        price_row = {}
+        next_row = 2
+        rsi_row = dict(row=next_row, col=1) if include_rsi else {}
+        if include_rsi:
+            next_row += 1
+        daily_row = dict(row=next_row, col=1) if include_daily else {}
 
     # Price / OHLC pane
     if use_ohlc:
@@ -561,7 +834,7 @@ def _build_technical_chart(
     else:
         raw_last = float(win_close.iloc[-1])
         last_y = raw_last * scale
-        if view_mode == "Normalized":
+        if view_mode == "Rebased 100":
             badge_txt = f"{last_y:.2f}"
         else:
             badge_txt = _fmt_level(raw_last, False)
@@ -574,8 +847,8 @@ def _build_technical_chart(
 
     annot_kwargs = dict(
         x=1.005, y=last_y,
-        xref=("x domain" if not two_pane else "x1 domain"),
-        yref=("y" if not two_pane else "y1"),
+        xref=("x domain" if n_panels == 1 else "x1 domain"),
+        yref=("y" if n_panels == 1 else "y1"),
         text=f"<b>{badge_txt}</b>",
         showarrow=False,
         xanchor="left", yanchor="middle",
@@ -587,7 +860,7 @@ def _build_technical_chart(
     fig.add_annotation(**annot_kwargs)
 
     # RSI sub-panel
-    if two_pane:
+    if include_rsi:
         fig.add_trace(
             go.Scatter(
                 x=rsi_series.index, y=rsi_series.values, mode="lines",
@@ -595,18 +868,32 @@ def _build_technical_chart(
                 name="RSI14", showlegend=False,
                 hovertemplate="RSI %{y:.0f}<extra></extra>",
             ),
-            row=2, col=1,
+            **rsi_row,
         )
-        fig.add_hline(y=70, line_dash="dot", line_color="#d62728", opacity=0.4, row=2, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="#2ca02c", opacity=0.4, row=2, col=1)
-        fig.update_yaxes(range=[0, 100], side="right", row=2, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="#d62728", opacity=0.4, **rsi_row)
+        fig.add_hline(y=30, line_dash="dot", line_color="#2ca02c", opacity=0.4, **rsi_row)
+        fig.update_yaxes(range=[0, 100], side="right", **rsi_row)
 
-    # ---- Heights -------------------------------------------------------
-    base_height = 420 if large_mode else 340
-    if two_pane:
-        base_height += 90
+    # Daily-returns sub-panel — bars, green up / red down. In Rebased 100
+    # view we still show *raw* returns (%/bp) because a "return of a
+    # rebased series" adds no new information vs the raw return.
+    if include_daily:
+        unit = "bp" if is_rate else "%"
+        bar_colors = ["#2ca02c" if v >= 0 else "#d62728" for v in daily_changes.values]
+        fig.add_trace(
+            go.Bar(
+                x=daily_changes.index, y=daily_changes.values,
+                marker_color=bar_colors,
+                name=f"Daily ({unit})", showlegend=False,
+                hovertemplate="%{x|%Y-%m-%d} · %{y:+.2f} " + unit + "<extra></extra>",
+            ),
+            **daily_row,
+        )
+        fig.add_hline(y=0, line_dash="solid", line_color="#999", opacity=0.35, line_width=1, **daily_row)
+        fig.update_yaxes(side="right", **daily_row)
+
     fig.update_layout(
-        height=base_height,
+        height=total_h,
         # Enough right margin for the y-axis ticks + last-price badge.
         margin=dict(l=20, r=90, t=15, b=30),
         showlegend=bool(ma_series),
@@ -620,8 +907,8 @@ def _build_technical_chart(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
-    # Y-axis on the RIGHT for both panes; strict shared x-range so
-    # every asset in the stack aligns vertically pixel-for-pixel.
+    # Y-axis on the RIGHT for all panes; strict shared x-range so
+    # every asset aligns pixel-for-pixel.
     fig.update_xaxes(
         showgrid=True, gridcolor="rgba(0,0,0,0.05)",
         range=[window_start, window_end],
@@ -763,14 +1050,14 @@ def _render_scan_board(
         "Chart", ["Line", "OHLC"], index=0, horizontal=True, key="sb_chart_type",
     )
     view_mode = r1c4.radio(
-        "View", ["Level", "Normalized"], index=0, horizontal=True, key="sb_view",
-        help="OHLC forces Level (normalising OHLC bars is visually misleading).",
+        "View", ["Level", "Rebased 100"], index=0, horizontal=True, key="sb_view",
+        help="Rebased 100 sets the first observation of the window to 100. OHLC forces Level.",
     )
 
     # ---- Toolbar row 2 — MAs / S/R / RSI panel / Large / sort
     r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns([3, 1, 1.4, 1, 2])
     active_mas = r2c1.multiselect(
-        "Moving averages", _MA_LABELS, default=["MA50", "MA200"], key="sb_mas",
+        "Moving averages", _MA_LABELS, default=["MA50"], key="sb_mas",
         help="Computed on the full loaded history so warm-up doesn't clip the display window.",
     )
     show_sr = r2c2.checkbox(
