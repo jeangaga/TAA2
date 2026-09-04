@@ -155,6 +155,121 @@ def _canon_scenario(draft: pd.DataFrame, book_name: str = "Scenario") -> pd.Data
     return books.canonicalize_book(draft, book_name=book_name, keep_zero_size=True)
 
 
+# --------------------------------------------------------------------------
+# Editor-boundary Size conversion (UI: 1 = 1% for pct-exposure assets;
+# canonical form stays 0.01 = 1%). Rates keep their duration convention
+# untouched. All conversions happen ONLY at the editor's read/write
+# boundary — the scenario_book, Books.csv, Trades.csv and the engine
+# never see the UI form.
+# --------------------------------------------------------------------------
+_SCENARIO_DEFAULT_VISIBLE = ["Strategy", "RIC", "RIC Name", "Size"]
+_SCENARIO_OPTIONAL_COLS = ["EntryDate", "ExitDate", "Comment"]
+
+
+def _row_is_rate(row, registry) -> bool:
+    """True when a book row represents a Rate (yield-level) asset.
+
+    Priority 1: registry lookup by ``RIC Name`` — the registry is the
+    canonical source of truth, so if the user swaps RIC Name in the
+    editor (say EUR → UST 10Y) the classification follows the new
+    asset immediately even though ``AssetClass`` on the row still
+    carries the old value.
+
+    Priority 2: fallback to the ``AssetClass`` column on the row, for
+    custom / unregistered RIC Names that don't resolve.
+
+    Never inferred from the numeric ``Size`` — a Size of 0.20 could
+    be a 20 % equity long or a 0.20y duration rates position; only
+    the asset class disambiguates.
+    """
+    rn = str(row.get("RIC Name", "") or "").strip()
+    if registry is not None and not (hasattr(registry, "empty") and registry.empty) and rn:
+        entry = reg.lookup(registry, rn)
+        if entry is not None:
+            return entry.asset_class == "Rate"
+    ac = str(row.get("AssetClass", "") or "").strip().lower()
+    return ac == "rate"
+
+
+def _scenario_rate_mask(canonical: pd.DataFrame, registry) -> pd.Series:
+    """Boolean series aligned with ``canonical`` — True where the row is a Rate."""
+    if canonical is None or canonical.empty:
+        return pd.Series(dtype=bool)
+    mask = canonical.apply(lambda r: _row_is_rate(r, registry), axis=1)
+    return mask.reset_index(drop=True)
+
+
+def _to_editor_view(
+    canonical: pd.DataFrame,
+    visible_cols: list[str],
+    registry,
+) -> pd.DataFrame:
+    """Build the frame handed to ``st.data_editor``.
+
+    * Percentage-exposure rows have ``Size × 100`` so ``2.00`` reads
+      as ``+2 %``; canonical remains ``0.02``.
+    * Rate rows keep their canonical ``Size`` (duration in years).
+    * Row order preserved so ``_from_editor_view`` can align edited
+      rows to their originals positionally, letting the user rewrite
+      key columns (Strategy / RIC / RIC Name) legally.
+    """
+    df = canonical.reindex(columns=visible_cols).copy().reset_index(drop=True)
+    if "Size" not in df.columns:
+        return df
+    rate_mask = _scenario_rate_mask(canonical, registry)
+    size = pd.to_numeric(df["Size"], errors="coerce")
+    df["Size"] = size.where(rate_mask, size * 100.0)
+    return df
+
+
+def _from_editor_view(
+    edited: pd.DataFrame,
+    canonical: pd.DataFrame,
+    visible_cols: list[str],
+    registry,
+) -> pd.DataFrame:
+    """Merge editor commits back into the canonical scenario frame.
+
+    * Hidden columns (``EntryDate`` / ``ExitDate`` / ``Comment`` when
+      the user hasn't toggled them on, ``AssetClass``, ``BookName``,
+      diagnostics) are preserved untouched from the original row —
+      hiding a column never destroys its data.
+    * Editor Size is converted back: ``÷ 100`` for percentage rows,
+      unchanged for rate rows.
+    * Positional alignment (``reset_index``) tolerates the user
+      editing the ``Strategy`` / ``RIC`` / ``RIC Name`` key columns.
+    """
+    if canonical is None:
+        return edited.copy()
+    merged = canonical.reset_index(drop=True).copy()
+    edited = edited.reset_index(drop=True).copy()
+    if len(edited) != len(merged):
+        # Should never happen with num_rows="fixed"; return canonical
+        # untouched rather than silently misalign columns to rows.
+        return merged
+    rate_mask = _scenario_rate_mask(canonical, registry)
+    for col in visible_cols:
+        if col not in edited.columns:
+            continue
+        if col == "Size":
+            size = pd.to_numeric(edited["Size"], errors="coerce")
+            merged["Size"] = size.where(rate_mask, size / 100.0)
+        else:
+            merged[col] = edited[col].values
+    return merged
+
+
+def _canonical_size_from_ui(ui_size: float, asset_class: str) -> float:
+    """Convert an Add-Position ``Size`` input to canonical form.
+
+    ``1.5`` (UI) → ``0.015`` (canonical) for FX/Equity/blank; rates
+    pass through unchanged (``0.20`` → ``0.20``).
+    """
+    if str(asset_class).strip().lower() == "rate":
+        return float(ui_size)
+    return float(ui_size) / 100.0
+
+
 def _refresh_library(
     current_book: pd.DataFrame,
     *,
@@ -768,67 +883,100 @@ with tabs[4]:
         sb = st.session_state.scenario_book
 
         # ---- Editable grid --------------------------------------------
-        st.markdown("### Edit existing rows")
+        # A discreet Columns popover lets the user opt-in to the metadata
+        # columns (EntryDate / ExitDate / Comment) without cluttering the
+        # default view. Hiding a column NEVER removes its data — the
+        # merge helper `_from_editor_view` preserves anything not
+        # currently in the visible-column set.
+        edit_hdr_col, cols_toggle_col = st.columns([5, 1])
+        edit_hdr_col.markdown("### Edit existing rows")
+        with cols_toggle_col.popover("⚙ Columns", use_container_width=True):
+            st.caption("Optional columns — hidden by default.")
+            st.checkbox("EntryDate", key="scenario_show_entrydate", value=False)
+            st.checkbox("ExitDate", key="scenario_show_exitdate", value=False)
+            st.checkbox("Comment", key="scenario_show_comment", value=False)
+
         st.caption(
-            "Grid for editing **existing** positions — Size, dates, "
-            "comment, RIC / RIC Name, and Strategy (any label in the "
-            "registry, including previously-pruned ones). To add rows "
-            "or introduce a brand-new strategy label, use the Add "
-            "position form below."
+            "Grid for editing **existing** positions. Sizes for FX / Equity "
+            "are entered as **1 = 1 % exposure**; rates as duration in "
+            "years (e.g. 0.20). Metadata columns are hidden by default — "
+            "use **⚙ Columns** to show them; hiding a column never removes "
+            "its data. To add rows or introduce a brand-new strategy label, "
+            "use the Add position form below."
         )
 
-        edit_cols = ["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate", "Comment"]
-        sb_view = sb.reindex(columns=edit_cols)
+        visible_cols = list(_SCENARIO_DEFAULT_VISIBLE)
+        for optional in _SCENARIO_OPTIONAL_COLS:
+            if st.session_state.get(f"scenario_show_{optional.lower()}"):
+                visible_cols.append(optional)
+
+        # Streamlit's data_editor keeps a diff keyed by (widget_key, columns).
+        # When the visible column set changes we drop the stored diff so the
+        # editor re-renders cleanly against the new schema.
+        _col_signature = "|".join(visible_cols)
+        if st.session_state.get("_scenario_editor_col_sig") != _col_signature:
+            st.session_state.pop("scenario_editor", None)
+            st.session_state["_scenario_editor_col_sig"] = _col_signature
+
+        # Registry drives rate-vs-percentage classification for Size
+        # conversion. Load lazily so a missing / corrupt registry doesn't
+        # break the editor — non-rate is the safe fallback.
+        try:
+            _registry_for_editor = reg.load_registry()
+        except Exception:  # noqa: BLE001
+            _registry_for_editor = None
+
         ric_name_options = sorted(set(asset_returns.columns.astype(str)))
+        editor_view = _to_editor_view(sb, visible_cols, _registry_for_editor)
+
+        column_config = {
+            "Strategy": st.column_config.SelectboxColumn(
+                "Strategy",
+                help=(
+                    "Pick any label from the strategy registry (every "
+                    "label seen in any book this session + anything "
+                    "you've typed). Pruned labels stay pickable."
+                ),
+                options=universe_strats,
+                required=False,
+            ),
+            "RIC": st.column_config.TextColumn("RIC"),
+            "RIC Name": st.column_config.SelectboxColumn(
+                "RIC Name",
+                help="Must match a column in the price / rate files for the row to contribute returns. Unmatched rows contribute zero silently.",
+                options=ric_name_options,
+                required=False,
+            ),
+            "Size": st.column_config.NumberColumn(
+                "Size",
+                format="%.4f",
+                step=0.10,
+                help="Position size. FX / Equity: 1 = 1 % exposure. Rates: duration in years.",
+            ),
+            "EntryDate": st.column_config.DateColumn("EntryDate"),
+            "ExitDate": st.column_config.DateColumn("ExitDate"),
+            "Comment": st.column_config.TextColumn("Comment"),
+        }
 
         edited = st.data_editor(
-            sb_view,
-            column_config={
-                "Strategy": st.column_config.SelectboxColumn(
-                    "Strategy",
-                    help=(
-                        "Pick any label from the strategy registry "
-                        "(union of every book's strategies + anything "
-                        "you've typed). Pruned labels still show up "
-                        "here — the registry is sticky across pruning. "
-                        "To create a brand-new label, use the Add "
-                        "position form below."
-                    ),
-                    options=universe_strats,
-                    required=False,
-                ),
-                "RIC": st.column_config.TextColumn("RIC"),
-                "RIC Name": st.column_config.SelectboxColumn(
-                    "RIC Name",
-                    help="Must match a column in the price/rate files for the row to contribute returns. Unmatched rows contribute zero silently.",
-                    options=ric_name_options,
-                    required=False,
-                ),
-                "Size": st.column_config.NumberColumn(
-                    "Size", format="%.4f", step=0.005,
-                    help="Position size. Equity = % exposure (0.01 = 1%). Rates = duration.",
-                ),
-                "EntryDate": st.column_config.DateColumn("EntryDate"),
-                "ExitDate": st.column_config.DateColumn("ExitDate"),
-                "Comment": st.column_config.TextColumn("Comment"),
-            },
+            editor_view,
+            column_config={k: v for k, v in column_config.items() if k in visible_cols},
             hide_index=True,
             use_container_width=True,
             num_rows="fixed",
             key="scenario_editor",
         )
 
-        # Persist edits: canonicalise so the scenario object stays a valid
-        # book (one row per key, no blanks, recomputed diagnostics).
-        edited_for_store = edited.copy()
-        edited_for_store["BookName"] = "Scenario"
-        # AssetClass is not exposed in the editor — carry it forward from
-        # the existing scenario where the Strategy × RIC × RIC Name key
-        # matches, leave blank otherwise. Diagnostics are recomputed in
-        # canonicalize_book so we don't carry them forward here.
-        if "AssetClass" not in edited_for_store.columns:
-            edited_for_store["AssetClass"] = ""
-        st.session_state.scenario_book = _canon_scenario(edited_for_store)
+        # Merge back into canonical: converts editor Size back to canonical
+        # units and preserves every hidden column (AssetClass, BookName,
+        # diagnostics, plus the metadata columns the user did not opt-in
+        # to show). Canonicalisation then recomputes diagnostics and
+        # keeps Size=0 template rows.
+        merged = _from_editor_view(edited, sb, visible_cols, _registry_for_editor)
+        merged["BookName"] = "Scenario"
+        if "AssetClass" not in merged.columns:
+            merged["AssetClass"] = ""
+        st.session_state.scenario_book = _canon_scenario(merged)
 
         # ---- Scenario risk summary ------------------------------------
         # Inline risk read-out for the *scenario* itself, independent of
@@ -1131,8 +1279,9 @@ with tabs[4]:
                 key="add_strat_new",
             )
             size_val = ar_col3.number_input(
-                "Size", value=0.01, format="%.4f", step=0.005,
-                help="Equity = % exposure (0.01 = 1%). Rates = duration.",
+                "Size",
+                value=1.00, format="%.4f", step=0.10,
+                help="FX / Equity: 1 = 1 % exposure. Rates: duration in years (e.g. 0.20).",
                 key="add_size",
             )
 
@@ -1157,16 +1306,17 @@ with tabs[4]:
                 key="add_ric",
             )
 
-            d_col1, d_col2, cm_col = st.columns(3)
-            entry_date_val = d_col1.date_input(
-                "Entry date", value=as_of_ts.date(), key="add_entry_date",
-            )
-            exit_date_val = d_col2.date_input(
-                "Exit date (optional)", value=None, key="add_exit_date",
-            )
-            comment_val = cm_col.text_input(
-                "Comment", value="", key="add_comment",
-            )
+            with st.expander("+ Optional details (Entry / Exit / Comment)"):
+                d_col1, d_col2, cm_col = st.columns(3)
+                entry_date_val = d_col1.date_input(
+                    "Entry date", value=as_of_ts.date(), key="add_entry_date",
+                )
+                exit_date_val = d_col2.date_input(
+                    "Exit date (optional)", value=None, key="add_exit_date",
+                )
+                comment_val = cm_col.text_input(
+                    "Comment", value="", key="add_comment",
+                )
 
             submitted = st.form_submit_button("Add row", use_container_width=True)
 
@@ -1185,18 +1335,38 @@ with tabs[4]:
                 for msg in errors:
                     st.error(msg)
             else:
+                # Resolve AssetClass from the registry so we know whether
+                # to interpret the UI Size as a percentage (FX / Equity)
+                # or as a duration (Rate). The engine only cares about
+                # canonical Size but AssetClass is also useful metadata
+                # for downstream diagnostics + book comparisons.
+                resolved_asset_class = ""
+                try:
+                    _reg_for_add = reg.load_registry()
+                except Exception:  # noqa: BLE001
+                    _reg_for_add = None
+                if resolved_ric_name and _reg_for_add is not None and not _reg_for_add.empty:
+                    _entry = reg.lookup(_reg_for_add, resolved_ric_name)
+                    if _entry is not None:
+                        resolved_asset_class = _entry.asset_class
+
+                # Convert the UI Size to canonical: 1.5 → 0.015 for
+                # FX/Equity/blank rows; rate rows pass through
+                # unchanged (0.20 → 0.20).
+                canonical_size = _canonical_size_from_ui(float(size_val), resolved_asset_class)
+
                 new_row = pd.DataFrame([{
                     "BookName": "Scenario",
                     "Strategy": resolved_strat,
-                    "AssetClass": "",
+                    "AssetClass": resolved_asset_class,
                     "RIC": ric_val.strip(),
                     "RIC Name": resolved_ric_name,
-                    "Size": float(size_val),
+                    "Size": canonical_size,
                     "EntryDate": pd.Timestamp(entry_date_val) if entry_date_val else pd.NaT,
                     "ExitDate": pd.Timestamp(exit_date_val) if exit_date_val else pd.NaT,
                     "Comment": comment_val.strip(),
                     "TradeCount": 1,
-                    "GrossUnderlyingSize": abs(float(size_val)),
+                    "GrossUnderlyingSize": abs(canonical_size),
                 }])
                 combined = pd.concat(
                     [st.session_state.scenario_book, new_row],
