@@ -76,12 +76,18 @@ from core.config import (
 )
 from ui import data_manager as dm
 from ui import market_tab
+from ui import styling
 from utils import plotting
 
 # --------------------------------------------------------------------------
 # Streamlit config + cached loaders
 # --------------------------------------------------------------------------
 st.set_page_config(page_title="TAA Trade Book", layout="wide")
+
+# App-wide typography pass (CSS + Plotly font template). Styling only —
+# no state, layout or logic changes. Runs on every rerun; Streamlit
+# de-dupes the injected CSS block.
+styling.apply()
 
 load_price_data = st.cache_data(data.load_price_data, show_spinner=False)
 load_rate_data = st.cache_data(data.load_rate_data, show_spinner=False)
