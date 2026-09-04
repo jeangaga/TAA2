@@ -759,15 +759,25 @@ with tabs[4]:
         _mu_registry = None
     _loaded_prices = list(eq_prices.columns) if eq_prices is not None else []
     _loaded_rates = list(rates_levels.columns) if rates_levels is not None else []
-    _mu_all = sorted(set(_loaded_prices) | set(_loaded_rates))
+    # Registry (PM) order — do NOT alphabetically sort. The FX family
+    # has an explicit PM ordering (see ``core.asset_registry.FX_YAHOO_ORDER``)
+    # that must reach the Editable Scenario seed unchanged.
+    _mu_all = reg.ordered_loaded(_mu_registry, set(_loaded_prices) | set(_loaded_rates))
+    _mu_all_set = set(_mu_all)
 
     def _universe_for(scope: str) -> list[str]:
         if scope == "All loaded" or _mu_registry is None or _mu_registry.empty:
             return _mu_all
         fam_map = reg.by_family(_mu_registry)
-        return sorted([n for n in fam_map.get(scope, []) if n in _mu_all])
+        # fam_map values are already in registry order — preserve it.
+        return [n for n in fam_map.get(scope, []) if n in _mu_all_set]
 
-    _MU_SCOPES = ["All loaded", "FX", "Equity Indices", "Rates"]
+    # Scope options are discovered from the registry so new families
+    # (US Equities today, Commodities tomorrow …) become selectable
+    # automatically. "All loaded" is the always-present catch-all.
+    _MU_SCOPES = ["All loaded"]
+    if _mu_registry is not None and not _mu_registry.empty:
+        _MU_SCOPES.extend(reg.families(_mu_registry))
     mu_scope_col, mu_seed_col, mu_sync_col, mu_note_col = st.columns([2, 1, 1, 2])
     mu_scope = mu_scope_col.selectbox(
         "Universe scope",
