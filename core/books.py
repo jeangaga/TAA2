@@ -306,8 +306,13 @@ def canonicalize_book(
         return ""
 
     keys = ["Strategy", "RIC", "RIC Name"]
+    # `sort=False` preserves the caller's row order (first-appearance
+    # of each key). Important for the FX universe, which follows an
+    # explicit PM ordering (see ``core.asset_registry.FX_YAHOO_ORDER``)
+    # that would otherwise be re-alphabetized by ``groupby``. This
+    # affects only row order — aggregation semantics are unchanged.
     agg = (
-        df.groupby(keys, dropna=False)
+        df.groupby(keys, dropna=False, sort=False)
         .agg(
             Size=("Size", "sum"),
             TradeCount=("Size", "count"),

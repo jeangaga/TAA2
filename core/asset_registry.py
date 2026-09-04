@@ -64,6 +64,59 @@ TRUE_TOKENS = {"TRUE", "T", "YES", "Y", "1"}
 
 DEFAULT_REGISTRY_PATH = Path(__file__).resolve().parents[1] / "data" / "asset_registry.csv"
 
+# --------------------------------------------------------------------------
+# Explicit PM ordering — Yahoo FX universe
+# --------------------------------------------------------------------------
+# The CSV rows for FX assets are laid out in this exact order (source of
+# truth is the CSV; this constant is the assertion / documentation copy).
+# Every UI path that renders the FX family MUST preserve this ordering
+# and NEVER alphabetically re-sort it. Unknown / legacy FX assets are
+# appended after ``AUDNZD`` in their existing relative order.
+FX_YAHOO_ORDER: list[str] = [
+    "EUR",     # EUR/USD
+    "JPY",     # USD/JPY
+    "AUD",     # AUD/USD
+    "EURGBP",  # EUR/GBP
+    "EURSEK",  # EUR/SEK
+    "EURNOK",  # EUR/NOK
+    "EURCHF",  # EUR/CHF
+    "CAD",     # USD/CAD
+    "BRL",     # USD/BRL
+    "MXN",     # USD/MXN
+    "ZAR",     # USD/ZAR
+    "CNH",     # USD/CNH
+    "NOKSEK",  # NOK/SEK
+    "AUDNZD",  # AUD/NZD
+]
+FX_YAHOO_RANK: dict[str, int] = {name: idx for idx, name in enumerate(FX_YAHOO_ORDER)}
+
+# Explicit PM ordering — Yahoo US Equities universe.
+# Top-down macro-scanning order: broad indices first, then mega-cap
+# tech, semis, financials, consumer, industrials, energy, healthcare.
+# Same rule as FX: CSV row order is the source of truth, this list is
+# the assertion / documentation copy, and no UI path may alphabetically
+# re-sort the family. Unknown / new US-equity assets append after
+# ``UNH`` in their existing relative order.
+US_EQUITIES_ORDER: list[str] = [
+    # Broad indices
+    "SPX", "NDX", "RUT", "SOX",
+    # Mega-cap tech
+    "NVDA", "AVGO", "MSFT", "AMZN", "GOOGL", "META", "AAPL", "TSLA", "ORCL",
+    # Semiconductors
+    "AMD", "MU",
+    # Financials
+    "JPM", "GS", "BAC", "V",
+    # Consumer
+    "WMT", "COST", "HD", "MCD",
+    # Industrials
+    "CAT", "GE", "BA",
+    # Energy
+    "XOM", "CVX",
+    # Healthcare
+    "LLY", "UNH",
+]
+US_EQUITIES_RANK: dict[str, int] = {name: idx for idx, name in enumerate(US_EQUITIES_ORDER)}
+
 
 @dataclass(frozen=True)
 class AssetEntry:
@@ -189,18 +242,59 @@ def core_assets(registry: pd.DataFrame) -> list[str]:
 
 
 def families(registry: pd.DataFrame) -> list[str]:
-    """Sorted list of family labels that have at least one member."""
-    fs = sorted({f for f in registry["Family"].tolist() if f})
-    return fs
+    """Distinct family labels in registry (CSV) order.
+
+    Order-of-first-appearance rather than alphabetical, so that the
+    family selector in the UI presents families in the same
+    hierarchical order the CSV encodes (e.g. US Equities before
+    Equity Indices before FX before Rates). Callers must NOT sort
+    the result.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for f in registry["Family"].tolist():
+        if f and f not in seen:
+            seen.add(f)
+            ordered.append(f)
+    return ordered
 
 
 def by_family(registry: pd.DataFrame) -> dict[str, list[str]]:
-    """{Family: [internal names]} — includes only rows with a non-empty Family."""
+    """{Family: [internal names]} — includes only rows with a non-empty Family.
+
+    Values follow registry CSV row order (which encodes the PM ordering
+    for FX; see :data:`FX_YAHOO_ORDER`). Callers must NOT ``sorted(...)``
+    the returned lists — that would defeat the whole point of the
+    explicit registry order.
+    """
     out: dict[str, list[str]] = {}
     df = registry[registry["Family"] != ""]
-    for fam, sub in df.groupby("Family"):
-        out[fam] = sub["InternalName"].tolist()
+    # Iterate in CSV order rather than via ``groupby`` (which is
+    # order-preserving within groups but concentrates them by group key
+    # in an implementation-specific order).
+    for _, row in df.iterrows():
+        out.setdefault(row["Family"], []).append(row["InternalName"])
     return out
+
+
+def ordered_loaded(
+    registry: pd.DataFrame | None,
+    loaded_names: Iterable[str],
+) -> list[str]:
+    """Return the loaded asset names in registry CSV order.
+
+    Anything in ``loaded_names`` that is NOT in the registry is
+    appended at the end in its input order (mirrors the PM rule for
+    the FX universe: unknown assets go after the known list without
+    reshuffling it).
+    """
+    loaded_set = set(loaded_names)
+    if registry is None or registry.empty:
+        return list(loaded_names)
+    known = [n for n in registry["InternalName"] if n in loaded_set]
+    known_set = set(known)
+    extras = [n for n in loaded_names if n not in known_set]
+    return known + extras
 
 
 def demo_positions(registry: pd.DataFrame) -> list[tuple[str, float, str, str]]:
