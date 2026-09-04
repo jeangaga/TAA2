@@ -48,12 +48,6 @@ ZAR,USD/ZAR,FX,ZAR=X,pct_change,FX,EM,FALSE,,,
 CNH,USD/CNH,FX,CNH=X,pct_change,FX,EM,FALSE,,,
 NOKSEK,NOK/SEK,FX,NOKSEK=X,pct_change,FX,G10,FALSE,,,
 AUDNZD,AUD/NZD,FX,AUDNZD=X,pct_change,FX,G10,FALSE,,,
-CHF,USD/CHF,FX,CHF=X,pct_change,FX,G10,FALSE,,,Legacy — PM order prefers EURCHF cross
-GBP,GBP/USD,FX,GBPUSD=X,pct_change,FX,G10,FALSE,,,Legacy — PM order prefers EURGBP cross
-NOK,USD/NOK,FX,NOK=X,pct_change,FX,G10,FALSE,,,Legacy — PM order prefers EURNOK cross
-NZD,NZD/USD,FX,NZDUSD=X,pct_change,FX,G10,FALSE,,,Legacy — PM order prefers AUDNZD cross
-SEK,USD/SEK,FX,SEK=X,pct_change,FX,G10,FALSE,,,Legacy — PM order prefers EURSEK cross
-CZK,USD/CZK,FX,CZK=X,pct_change,FX,EM,FALSE,,,Legacy
 UST 2Y,US Treasury 2Y Yield,Rate,,neg_dyield,Rates,US Curve,FALSE,,,No 2Y series on Yahoo
 UST 5Y,US Treasury 5Y Yield,Rate,^FVX,neg_dyield,Rates,US Curve,FALSE,,,
 UST 10Y,US Treasury 10Y Yield,Rate,^TNX,neg_dyield,Rates,US Curve,TRUE,0.20,US10Y,
