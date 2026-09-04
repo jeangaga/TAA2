@@ -1,28 +1,23 @@
-"""App-wide typography + Plotly-font pass.
+"""App-wide typography + Plotly-font pass — rev 2.
 
-Streamlit's default typography reads a couple of clicks too small for
-an institutional dashboard sitting next to price charts, tables and
-metrics. This module bumps the whole system ~20-30% via a single CSS
-injection plus a matching Plotly template. Logic, state and layout
-are untouched — only text sizes and weights change.
+The first pass injected component-level CSS with ``!important`` and it
+never bit. Root cause: Streamlit's own styles frequently win on
+specificity, and many components size themselves in ``rem`` — so the
+most reliable global lever is to bump the root ``html { font-size }``
+and let ``rem``-based sizing scale up with it.
 
-Call :func:`apply` exactly once, right after ``st.set_page_config``
-in ``streamlit_app.py``.
+This module now does both:
 
-Scope reference (target sizes)
------------------------------
-* Body / paragraph text  ~15 px
-* Widget labels          ~14 px (medium weight)
-* Buttons / tabs         ~15 px
-* Selectbox / multiselect content ~14 px
-* Table + data-editor cells ~14 px
-* Metric value           ~29 px, weight 600
-* Metric label           ~13 px
-* Section H1 / H2 / H3   32 / 24 / 20 px
-* App title              38 px
-* Plotly axis labels     13 px  (was Streamlit-default 11)
-* Plotly axis tickfont   12 px
-* Plotly chart title     17 px
+1. Sets ``html`` and ``body`` to a **17 px** base (Streamlit's default
+   is ~14 px effective). Every widget that sizes in ``rem`` (which is
+   most of them) scales up automatically.
+2. Layers component-specific overrides on top, with high-specificity
+   selectors that survive Streamlit-internal styles.
+3. Registers a Plotly template so every chart's fonts follow suit.
+
+Injected via ``st.html`` when available (>= 1.33), falling back to
+``st.markdown(..., unsafe_allow_html=True)``. Call :func:`apply` once
+from ``streamlit_app.py`` right after ``st.set_page_config``.
 """
 from __future__ import annotations
 
@@ -30,171 +25,201 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
+# --------------------------------------------------------------------------
+# CSS
+# --------------------------------------------------------------------------
+# NOTE: the visible "TAA text scale test" marker at the very top lets you
+# tell at a glance whether the CSS actually reached the page. Remove it
+# once you've verified the pass is live in prod.
 _CSS = """
 <style>
-/* -----------------------------------------------------------------
-   Base body font
-   ----------------------------------------------------------------- */
-html, body, .stApp, [class*="css"] {
-    font-size: 15px;
+/* ==================================================================
+   ROOT SCALE — bump base rem so every rem-sized widget grows with it
+   ================================================================== */
+html { font-size: 17px !important; }
+body { font-size: 17px !important; }
+.stApp { font-size: 1rem !important; }
+
+/* ==================================================================
+   Diagnostic marker — a thin blue bar at the very top proves the CSS
+   is live. Remove me once verified in production.
+   ================================================================== */
+body::before {
+    content: "";
+    display: block;
+    height: 3px;
+    background: #1f77b4;
+    width: 100%;
 }
 
-/* -----------------------------------------------------------------
-   Headings
-   ----------------------------------------------------------------- */
-.stApp h1 { font-size: 32px !important; font-weight: 700 !important; line-height: 1.2 !important; }
-.stApp h2 { font-size: 24px !important; font-weight: 600 !important; line-height: 1.25 !important; }
-.stApp h3 { font-size: 20px !important; font-weight: 600 !important; line-height: 1.3 !important; }
-.stApp h4 { font-size: 17px !important; font-weight: 600 !important; }
+/* ==================================================================
+   HEADINGS
+   ================================================================== */
+.stApp h1, [data-testid="stMarkdownContainer"] h1 {
+    font-size: 2.1rem !important;   /* ≈ 36 px */
+    font-weight: 700 !important;
+    line-height: 1.2 !important;
+}
+.stApp h2, [data-testid="stMarkdownContainer"] h2 {
+    font-size: 1.55rem !important;  /* ≈ 26 px */
+    font-weight: 600 !important;
+    line-height: 1.25 !important;
+}
+.stApp h3, [data-testid="stMarkdownContainer"] h3 {
+    font-size: 1.25rem !important;  /* ≈ 21 px */
+    font-weight: 600 !important;
+    line-height: 1.3 !important;
+}
+.stApp h4, [data-testid="stMarkdownContainer"] h4 {
+    font-size: 1.1rem !important;   /* ≈ 19 px */
+    font-weight: 600 !important;
+}
 
-/* st.title outputs the first h1 in the app — make it a proper page title */
-.stApp > header + div h1:first-of-type,
-.block-container h1:first-of-type { font-size: 38px !important; font-weight: 700 !important; }
-
-/* -----------------------------------------------------------------
-   Body / captions / help text
-   ----------------------------------------------------------------- */
-.stMarkdown, .stMarkdown p, .stMarkdown li, .stText,
-[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {
-    font-size: 15px !important;
+/* ==================================================================
+   BODY TEXT / CAPTIONS
+   ================================================================== */
+.stApp p, .stApp li, .stApp span,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li {
+    font-size: 1rem !important;      /* ≈ 17 px */
     line-height: 1.5 !important;
 }
 [data-testid="stCaptionContainer"],
 [data-testid="stCaptionContainer"] p,
-.stCaption {
-    font-size: 13.5px !important;
+.stCaption, .stCaption p {
+    font-size: 0.82rem !important;   /* ≈ 14 px */
     color: #555 !important;
 }
 
-/* -----------------------------------------------------------------
-   Widget labels (selectbox, multiselect, checkbox, radio, date, file …)
-   ----------------------------------------------------------------- */
+/* ==================================================================
+   WIDGET LABELS  (selectbox, multiselect, radio, checkbox, date, …)
+   ================================================================== */
+.stApp label,
+.stApp label p,
 label[data-testid="stWidgetLabel"],
 label[data-testid="stWidgetLabel"] p,
-label[data-baseweb="form-control-label"],
-.stSelectbox label, .stMultiSelect label, .stTextInput label,
-.stDateInput label, .stFileUploader label, .stRadio label,
-.stCheckbox label p, .stNumberInput label {
-    font-size: 14px !important;
+label[data-baseweb="form-control-label"] {
+    font-size: 0.88rem !important;   /* ≈ 15 px */
     font-weight: 500 !important;
 }
 
-/* Selectbox / multiselect visible value */
-.stSelectbox [data-baseweb="select"] > div,
-.stMultiSelect [data-baseweb="select"] > div,
-.stTextInput input, .stNumberInput input, .stDateInput input {
-    font-size: 14px !important;
+/* Visible value inside inputs */
+.stApp input,
+.stApp textarea,
+.stApp [data-baseweb="select"],
+.stApp [data-baseweb="select"] div {
+    font-size: 0.88rem !important;
 }
 
-/* Dropdown menu items */
-[data-baseweb="menu"] li, [data-baseweb="menu"] div {
-    font-size: 14px !important;
+/* Dropdown popups */
+[data-baseweb="popover"] li,
+[data-baseweb="popover"] div {
+    font-size: 0.88rem !important;
 }
 
 /* Multiselect chips */
-[data-baseweb="tag"] {
-    font-size: 13px !important;
+[data-baseweb="tag"], [data-baseweb="tag"] div {
+    font-size: 0.82rem !important;
 }
 
-/* Radio option labels */
-.stRadio div[role="radiogroup"] label,
-.stRadio div[role="radiogroup"] label p {
-    font-size: 14px !important;
-}
-
-/* Checkbox label text */
-.stCheckbox label span, .stCheckbox label p {
-    font-size: 14px !important;
-}
-
-/* -----------------------------------------------------------------
-   Buttons
-   ----------------------------------------------------------------- */
-.stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
-    font-size: 14px !important;
+/* ==================================================================
+   BUTTONS  (regular / download / form-submit)
+   ================================================================== */
+.stApp button,
+.stApp .stButton > button,
+.stApp .stDownloadButton > button,
+.stApp .stFormSubmitButton > button,
+button[data-testid="baseButton-primary"],
+button[data-testid="baseButton-secondary"] {
+    font-size: 0.88rem !important;   /* ≈ 15 px */
     font-weight: 500 !important;
-    padding: 0.45rem 0.9rem !important;
+    padding: 0.5rem 0.95rem !important;
 }
 
-/* -----------------------------------------------------------------
-   Tabs — visibly larger with a little more padding
-   ----------------------------------------------------------------- */
+/* ==================================================================
+   TABS
+   ================================================================== */
 .stTabs [data-baseweb="tab-list"] { gap: 4px; }
-.stTabs [data-baseweb="tab"] {
-    font-size: 15px !important;
+.stTabs [data-baseweb="tab"],
+.stTabs [data-baseweb="tab"] p {
+    font-size: 0.92rem !important;   /* ≈ 15.5 px */
     font-weight: 500 !important;
     padding: 0.55rem 0.9rem !important;
 }
 
-/* -----------------------------------------------------------------
-   Metrics
-   ----------------------------------------------------------------- */
-[data-testid="stMetricValue"] {
-    font-size: 29px !important;
+/* ==================================================================
+   METRICS
+   ================================================================== */
+[data-testid="stMetricValue"],
+[data-testid="stMetricValue"] > div {
+    font-size: 1.75rem !important;   /* ≈ 30 px */
     font-weight: 600 !important;
     line-height: 1.15 !important;
 }
-[data-testid="stMetricValue"] > div { font-size: 29px !important; }
 [data-testid="stMetricLabel"],
 [data-testid="stMetricLabel"] p {
-    font-size: 13.5px !important;
+    font-size: 0.82rem !important;   /* ≈ 14 px */
     font-weight: 500 !important;
 }
-[data-testid="stMetricDelta"] { font-size: 13px !important; }
+[data-testid="stMetricDelta"] { font-size: 0.82rem !important; }
 
-/* -----------------------------------------------------------------
-   Tables — st.dataframe / st.data_editor
-   ----------------------------------------------------------------- */
-[data-testid="stDataFrame"], [data-testid="stDataEditor"] { font-size: 14px !important; }
-[data-testid="stDataFrame"] div, [data-testid="stDataEditor"] div { font-size: 14px !important; }
-[data-testid="stDataFrame"] th, [data-testid="stDataEditor"] th {
-    font-size: 14px !important;
+/* ==================================================================
+   DATAFRAME / DATA-EDITOR / STATIC TABLE
+   ================================================================== */
+[data-testid="stDataFrame"], [data-testid="stDataFrame"] div,
+[data-testid="stDataEditor"], [data-testid="stDataEditor"] div {
+    font-size: 0.88rem !important;   /* ≈ 15 px */
+}
+[data-testid="stDataFrame"] th,
+[data-testid="stDataEditor"] th {
     font-weight: 600 !important;
 }
-[data-testid="stTable"] table { font-size: 14px !important; }
-
-/* -----------------------------------------------------------------
-   Alerts (info / warning / success / error)
-   ----------------------------------------------------------------- */
-[data-testid="stAlert"], [data-testid="stAlert"] p,
-[data-testid="stAlertContentInfo"], [data-testid="stAlertContentWarning"],
-[data-testid="stAlertContentSuccess"], [data-testid="stAlertContentError"] {
-    font-size: 14px !important;
-    line-height: 1.5 !important;
+.stApp [data-testid="stTable"] table,
+.stApp [data-testid="stTable"] table td,
+.stApp [data-testid="stTable"] table th {
+    font-size: 0.88rem !important;
 }
-[data-testid="stNotification"] { font-size: 14px !important; }
 
-/* -----------------------------------------------------------------
-   Sidebar
-   ----------------------------------------------------------------- */
-[data-testid="stSidebar"] {
-    font-size: 15px !important;
+/* ==================================================================
+   ALERTS  (info / warning / success / error / toast)
+   ================================================================== */
+.stApp [data-testid="stAlert"],
+.stApp [data-testid="stAlert"] p,
+.stApp [data-testid="stAlert"] div,
+.stApp [data-testid="stNotification"],
+.stApp [data-testid="stNotification"] p {
+    font-size: 0.88rem !important;
+    line-height: 1.55 !important;
 }
-[data-testid="stSidebar"] h2 { font-size: 20px !important; }
-[data-testid="stSidebar"] h3 { font-size: 17px !important; }
 
-/* -----------------------------------------------------------------
-   Dialogs (Data Manager modal)
-   ----------------------------------------------------------------- */
-[data-testid="stDialog"] { font-size: 15px !important; }
-[data-testid="stDialog"] h1 { font-size: 22px !important; }
+/* ==================================================================
+   SIDEBAR + DIALOG
+   ================================================================== */
+[data-testid="stSidebar"] { font-size: 1rem !important; }
+[data-testid="stSidebar"] h2 { font-size: 1.25rem !important; }
+[data-testid="stSidebar"] h3 { font-size: 1.05rem !important; }
+[data-testid="stSidebar"] label { font-size: 0.88rem !important; }
 
-/* -----------------------------------------------------------------
-   Expander headers
-   ----------------------------------------------------------------- */
-[data-testid="stExpander"] summary p { font-size: 15px !important; font-weight: 500 !important; }
+[data-testid="stDialog"] { font-size: 1rem !important; }
+[data-testid="stDialog"] h1 { font-size: 1.35rem !important; }
+
+/* ==================================================================
+   EXPANDER HEADERS
+   ================================================================== */
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary p {
+    font-size: 0.95rem !important;
+    font-weight: 500 !important;
+}
 </style>
 """
 
 
+# --------------------------------------------------------------------------
+# Plotly template
+# --------------------------------------------------------------------------
 def _install_plotly_template() -> None:
-    """Register and default a Plotly template with bumped font sizes.
-
-    Existing figures that already set ``font=dict(size=...)`` inline
-    keep their inline value (Plotly precedence: figure > template).
-    We bump the four remaining explicit small sizes in market_tab.py
-    separately so the whole chart-book reads at the new baseline.
-    """
+    """Register a Plotly template with bumped fonts and default to it."""
     tpl = go.layout.Template()
     tpl.layout.font = dict(size=13)
     tpl.layout.title = dict(font=dict(size=17))
@@ -211,22 +236,26 @@ def _install_plotly_template() -> None:
     tpl.layout.hoverlabel = dict(font=dict(size=13))
 
     pio.templates["taa"] = tpl
-    # Compose on top of Plotly's default so existing template settings
-    # (colour scales, gridcolor, etc.) still apply.
     pio.templates.default = "plotly+taa"
 
 
+# --------------------------------------------------------------------------
+# Public entry point
+# --------------------------------------------------------------------------
 def apply() -> None:
     """Inject app-wide CSS + install the Plotly font template.
 
-    Idempotent-ish: the CSS block is emitted once per rerun (Streamlit
-    handles the DOM diff), and the Plotly template registration is
-    keyed by name so repeated calls are no-ops.
+    ``st.html`` is preferred where available (Streamlit >= 1.33) because
+    it emits the block as raw HTML without going through the Markdown
+    parser; ``st.markdown(..., unsafe_allow_html=True)`` is the
+    fallback for older versions.
     """
     if "taa" not in pio.templates:
         _install_plotly_template()
     else:
-        # Ensure the composed default is (re)applied on every rerun in
-        # case something else changed pio.templates.default.
         pio.templates.default = "plotly+taa"
-    st.markdown(_CSS, unsafe_allow_html=True)
+
+    if hasattr(st, "html"):
+        st.html(_CSS)
+    else:
+        st.markdown(_CSS, unsafe_allow_html=True)
