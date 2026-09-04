@@ -392,14 +392,20 @@ def _build_technical_chart(
     show_sr: bool,
     show_rsi_panel: bool,
     is_rate: bool,
+    large_mode: bool = False,
 ) -> go.Figure:
-    """Build one asset's technical chart.
+    """Build one asset's technical chart in chart-first Bloomberg style.
 
     * Line vs OHLC (falls back to Line if OHLC unavailable).
-    * MA overlays computed on the full history so warm-up doesn't
-      truncate the display window.
-    * Optional support/resistance horizontal lines from swing pivots.
+    * Y-axis on the RIGHT — matches Yahoo / Bloomberg conventions.
+    * Last-price badge on the right axis + faint horizontal line across
+      the plot at the latest close, so the current level is instantly
+      readable regardless of scroll depth.
+    * MAs computed on the full history so warm-up doesn't truncate.
+    * Optional swing-pivot support/resistance horizontal lines.
     * Optional RSI(14) sub-panel below the price pane.
+    * Strict explicit ``x-range`` for every asset so vertical alignment
+      across the chart-book is exact.
     """
     ohlc_available = tech.has_ohlc(full_frame)
     use_ohlc = chart_type == "OHLC" and ohlc_available and not is_rate
@@ -418,8 +424,9 @@ def _build_technical_chart(
                 text=f"No data for {asset} in this window",
                 showarrow=False, xref="paper", yref="paper", x=0.5, y=0.5,
             )],
-            margin=dict(l=40, r=40, t=20, b=30),
+            margin=dict(l=20, r=90, t=15, b=30),
         )
+        fig.update_xaxes(range=[window_start, window_end])
         return fig
 
     # Scale factor for Normalized view (line charts only)
@@ -451,7 +458,7 @@ def _build_technical_chart(
     if two_pane:
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.75, 0.25], vertical_spacing=0.04,
+            row_heights=[0.78, 0.22], vertical_spacing=0.04,
         )
         price_row = dict(row=1, col=1)
     else:
@@ -470,7 +477,6 @@ def _build_technical_chart(
                 increasing_line_color="#2ca02c",
                 decreasing_line_color="#d62728",
                 showlegend=False,
-                hovertext=None,
             ),
             **price_row,
         )
@@ -496,13 +502,14 @@ def _build_technical_chart(
         fig.add_trace(
             go.Scatter(
                 x=y.index, y=y.values, mode="lines", name=label,
-                line=dict(color=_MA_COLOUR[label], width=1.2, dash="dot"),
+                line=dict(color=_MA_COLOUR[label], width=1.1, dash="dot"),
+                opacity=0.85,
                 hovertemplate=f"{label} %{{y:.4f}}<extra></extra>",
             ),
             **price_row,
         )
 
-    # Support / resistance horizontal lines
+    # Support / resistance horizontal lines (only when toggle is on).
     for lvl in resistances:
         y = lvl * scale
         annot = f"R {_fmt_level(lvl, is_rate)}"
@@ -522,6 +529,45 @@ def _build_technical_chart(
             **price_row,
         )
 
+    # ---- Last-price line + badge on the right axis ------------------------
+    # Draws a subtle dotted horizontal so the current level is compared
+    # visually with MAs, S/R and window extremes; then adds a boxed
+    # annotation on the right axis with the formatted last value. In
+    # Normalized view we plot the rebased last value (matches the y
+    # scale) rather than the raw value.
+    if is_rate:
+        raw_last = float(win_close.iloc[-1])
+        last_y = raw_last  # rates always Level
+        badge_txt = _fmt_level(raw_last, True)
+        badge_col = "#1f77b4"
+    else:
+        raw_last = float(win_close.iloc[-1])
+        last_y = raw_last * scale
+        if view_mode == "Normalized":
+            badge_txt = f"{last_y:.2f}"
+        else:
+            badge_txt = _fmt_level(raw_last, False)
+        badge_col = "#1f77b4"
+
+    fig.add_hline(
+        y=last_y, line_dash="dot", line_color="#666666", opacity=0.4,
+        line_width=1, **price_row,
+    )
+
+    annot_kwargs = dict(
+        x=1.005, y=last_y,
+        xref=("x domain" if not two_pane else "x1 domain"),
+        yref=("y" if not two_pane else "y1"),
+        text=f"<b>{badge_txt}</b>",
+        showarrow=False,
+        xanchor="left", yanchor="middle",
+        bgcolor="rgba(255,255,255,0.95)",
+        bordercolor=badge_col,
+        borderwidth=1, borderpad=3,
+        font=dict(size=11, color=badge_col),
+    )
+    fig.add_annotation(**annot_kwargs)
+
     # RSI sub-panel
     if two_pane:
         fig.add_trace(
@@ -535,12 +581,16 @@ def _build_technical_chart(
         )
         fig.add_hline(y=70, line_dash="dot", line_color="#d62728", opacity=0.4, row=2, col=1)
         fig.add_hline(y=30, line_dash="dot", line_color="#2ca02c", opacity=0.4, row=2, col=1)
-        fig.update_yaxes(range=[0, 100], title_text="RSI", row=2, col=1)
+        fig.update_yaxes(range=[0, 100], side="right", row=2, col=1)
 
-    height = 400 if two_pane else (320 if use_ohlc else 300)
+    # ---- Heights -------------------------------------------------------
+    base_height = 420 if large_mode else 340
+    if two_pane:
+        base_height += 90
     fig.update_layout(
-        height=height,
-        margin=dict(l=40, r=70, t=10, b=25),
+        height=base_height,
+        # Enough right margin for the y-axis ticks + last-price badge.
+        margin=dict(l=20, r=90, t=15, b=30),
         showlegend=bool(ma_series),
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02,
@@ -552,17 +602,36 @@ def _build_technical_chart(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.05)")
+    # Y-axis on the RIGHT for both panes; strict shared x-range so
+    # every asset in the stack aligns vertically pixel-for-pixel.
+    fig.update_xaxes(
+        showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+        range=[window_start, window_end],
+        showticklabels=True,
+    )
+    fig.update_yaxes(
+        showgrid=True, gridcolor="rgba(0,0,0,0.05)",
+        side="right",
+    )
     return fig
 
 
 def _render_technical_metrics(
+    asset: str,
     metrics: tech.WindowMetrics,
     supports: list[float],
     resistances: list[float],
     is_rate: bool,
+    show_sr: bool,
 ) -> None:
+    """Compact horizontal metrics header printed **above** the chart.
+
+    * Line 1: bold asset name + Period / 1W / 1M / RSI.
+    * Line 2: vs MA50 / vs MA200.
+    * Line 3 (only when S/R toggle is active): R1/R2, S1/S2, plus
+      window high / low with distance. Kept off by default so the
+      chart-book stays chart-first.
+    """
     unit = "bp" if is_rate else "%"
     dec = 0 if is_rate else 2
 
@@ -574,37 +643,49 @@ def _render_technical_metrics(
     from_hi = metrics.from_high_bp if is_rate else metrics.from_high_pct
     from_lo = metrics.from_low_bp if is_rate else metrics.from_low_pct
 
-    rows = [
-        ("Last", f"<b>{_fmt_level(metrics.last, is_rate)}</b>"),
-        ("Period", _fmt_signed(perf, unit, dec)),
-        ("1W", _fmt_signed(w1, unit, dec)),
-        ("1M", _fmt_signed(m1, unit, dec)),
-        ("RSI14", _fmt_rsi(metrics.rsi14)),
-        ("vs MA50", _fmt_signed(vs50, unit, dec)),
-        ("vs MA200", _fmt_signed(vs200, unit, dec)),
-        ("W. High", f"{_fmt_level(metrics.high, is_rate)} · {_fmt_signed(from_hi, unit, dec)}"),
-        ("W. Low", f"{_fmt_level(metrics.low, is_rate)} · {_fmt_signed(from_lo, unit, dec)}"),
-    ]
-    if resistances:
-        rows.append(("R1", _fmt_level(resistances[0], is_rate)))
-        if len(resistances) > 1:
-            rows.append(("R2", _fmt_level(resistances[1], is_rate)))
-    if supports:
-        rows.append(("S1", _fmt_level(supports[0], is_rate)))
-        if len(supports) > 1:
-            rows.append(("S2", _fmt_level(supports[1], is_rate)))
+    sep = "&nbsp;·&nbsp;"
+    line1 = (
+        f"<span style='font-size:1.05rem;font-weight:600'>{asset}</span>"
+        f"&nbsp;&nbsp;&nbsp;<span style='color:#666'>Period</span> "
+        f"{_fmt_signed(perf, unit, dec)}{sep}"
+        f"<span style='color:#666'>1W</span> {_fmt_signed(w1, unit, dec)}{sep}"
+        f"<span style='color:#666'>1M</span> {_fmt_signed(m1, unit, dec)}{sep}"
+        f"<span style='color:#666'>RSI</span> {_fmt_rsi(metrics.rsi14)}"
+    )
+    line2 = (
+        f"<span style='color:#666'>vs MA50</span> {_fmt_signed(vs50, unit, dec)}{sep}"
+        f"<span style='color:#666'>vs MA200</span> {_fmt_signed(vs200, unit, dec)}"
+    )
+    body = (
+        f"<div style='font-size:0.9rem;line-height:1.45;margin-bottom:2px'>{line1}</div>"
+        f"<div style='font-size:0.88rem;color:#333;line-height:1.35'>{line2}</div>"
+    )
 
-    html_rows = "".join(
-        f"<tr><td style='color:#666;padding:1px 8px 1px 0;'>{k}</td>"
-        f"<td style='padding:1px 0;text-align:right'>{v}</td></tr>"
-        for k, v in rows
-    )
-    st.markdown(
-        "<table style='font-size:0.85rem;border-collapse:collapse;width:100%;'>"
-        + html_rows
-        + "</table>",
-        unsafe_allow_html=True,
-    )
+    if show_sr and (supports or resistances or metrics.high is not None):
+        parts: list[str] = []
+        if resistances:
+            r_str = " / ".join(_fmt_level(v, is_rate) for v in resistances)
+            parts.append(f"<span style='color:#666'>R</span> {r_str}")
+        if supports:
+            s_str = " / ".join(_fmt_level(v, is_rate) for v in supports)
+            parts.append(f"<span style='color:#666'>S</span> {s_str}")
+        if metrics.high is not None:
+            parts.append(
+                f"<span style='color:#666'>W. High</span> "
+                f"{_fmt_level(metrics.high, is_rate)} ({_fmt_signed(from_hi, unit, dec)})"
+            )
+        if metrics.low is not None:
+            parts.append(
+                f"<span style='color:#666'>W. Low</span> "
+                f"{_fmt_level(metrics.low, is_rate)} ({_fmt_signed(from_lo, unit, dec)})"
+            )
+        line3 = sep.join(parts)
+        body += (
+            f"<div style='font-size:0.85rem;color:#444;line-height:1.35;"
+            f"margin-top:2px'>{line3}</div>"
+        )
+
+    st.markdown(body, unsafe_allow_html=True)
 
 
 def _compute_asset_context(
@@ -668,18 +749,22 @@ def _render_scan_board(
         help="OHLC forces Level (normalising OHLC bars is visually misleading).",
     )
 
-    # ---- Toolbar row 2 — MAs / S/R / RSI panel / sort
-    r2c1, r2c2, r2c3, r2c4 = st.columns([3, 1, 1.4, 2])
+    # ---- Toolbar row 2 — MAs / S/R / RSI panel / Large / sort
+    r2c1, r2c2, r2c3, r2c4, r2c5 = st.columns([3, 1, 1.4, 1, 2])
     active_mas = r2c1.multiselect(
         "Moving averages", _MA_LABELS, default=["MA50", "MA200"], key="sb_mas",
         help="Computed on the full loaded history so warm-up doesn't clip the display window.",
     )
     show_sr = r2c2.checkbox(
         "S/R", value=False, key="sb_sr",
-        help="Nearest support/resistance from swing pivots clustered by ATR tolerance.",
+        help="Nearest support/resistance from swing pivots clustered by ATR tolerance. Also unlocks R/S + Window High/Low on the metrics line.",
     )
     show_rsi_panel = r2c3.checkbox("RSI panel", value=False, key="sb_rsi")
-    sort_by = r2c4.selectbox("Sort by", _SORT_OPTIONS, index=0, key="sb_sort")
+    large_mode = r2c4.checkbox(
+        "Large", value=False, key="sb_large",
+        help="Bump each chart from 340 px to 420 px for deeper inspection.",
+    )
+    sort_by = r2c5.selectbox("Sort by", _SORT_OPTIONS, index=0, key="sb_sort")
 
     # ---- Universe + date window
     universe = presets[preset]
@@ -740,22 +825,21 @@ def _render_scan_board(
         + f" · view {view_mode}"
     )
 
-    # ---- Render rows
+    # ---- Render rows: metrics ABOVE the chart, chart FULL WIDTH
     for asset in sorted_assets:
         frame, is_rate = frames[asset]
         metrics, supports, resistances, _ = contexts[asset]
-        st.markdown(f"#### {asset}")
-        chart_col, metrics_col = st.columns([4, 1.2])
-        with chart_col:
-            fig = _build_technical_chart(
-                asset, frame, start, end,
-                view_mode, chart_type, active_mas,
-                show_sr, show_rsi_panel, is_rate,
-            )
-            st.plotly_chart(
-                fig, use_container_width=True,
-                config={"displayModeBar": False},
-            )
-        with metrics_col:
-            _render_technical_metrics(metrics, supports, resistances, is_rate)
+        _render_technical_metrics(
+            asset, metrics, supports, resistances, is_rate, show_sr,
+        )
+        fig = _build_technical_chart(
+            asset, frame, start, end,
+            view_mode, chart_type, active_mas,
+            show_sr, show_rsi_panel, is_rate,
+            large_mode=large_mode,
+        )
+        st.plotly_chart(
+            fig, use_container_width=True,
+            config={"displayModeBar": False},
+        )
         st.divider()
