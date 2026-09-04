@@ -239,16 +239,28 @@ def book_to_books_csv(books: Dict[str, pd.DataFrame]) -> bytes:
 def canonicalize_book(
     book: pd.DataFrame,
     book_name: str = "",
+    *,
+    keep_zero_size: bool = False,
 ) -> pd.DataFrame:
     """Normalise a draft frame back into canonical book form.
 
     Canonical book invariant
     ------------------------
-    One row per ``Strategy x RIC x RIC Name``. No blank keys, no NaN /
-    zero Size. ``TradeCount`` and ``GrossUnderlyingSize`` are recomputed
-    from the (possibly duplicated) draft rows, ``EntryDate`` is the
+    One row per ``Strategy x RIC x RIC Name``. No blank keys, no NaN
+    Size, ``TradeCount`` and ``GrossUnderlyingSize`` recomputed from
+    the (possibly duplicated) draft rows. ``EntryDate`` is the
     earliest non-null, ``ExitDate`` the latest, ``AssetClass`` and
     ``Comment`` are carried forward from the first non-empty draft row.
+
+    Zero-size rows
+    --------------
+    By default ``Size == 0`` rows are dropped — they contribute nothing
+    to the engine and pollute per-row diagnostics. Pass
+    ``keep_zero_size=True`` when the caller is building or editing a
+    *template* book (e.g. the Market Universe scenario seed) that
+    needs placeholder rows the user will size later. The engine
+    already handles ``Size == 0`` correctly (contributes zero without
+    warnings), so this flag never breaks downstream analytics.
 
     Call this after any user mutation (editor commit, add-row,
     remove-strategy, transform, seed) so the book object stays loadable
@@ -279,8 +291,9 @@ def canonicalize_book(
         ~df["Strategy"].isin(MISSING_STRATEGY_TOKENS)
         & ~df["RIC Name"].isin(MISSING_STRATEGY_TOKENS)
         & df["Size"].notna()
-        & (df["Size"] != 0)
     )
+    if not keep_zero_size:
+        valid = valid & (df["Size"] != 0)
     df = df[valid].copy()
     if df.empty:
         return _empty_book(book_name)
@@ -308,9 +321,10 @@ def canonicalize_book(
     )
 
     # A second-pass reject: Size can sum to zero if long/short legs cancel.
-    agg = agg[agg["Size"] != 0].copy()
-    if agg.empty:
-        return _empty_book(book_name)
+    if not keep_zero_size:
+        agg = agg[agg["Size"] != 0].copy()
+        if agg.empty:
+            return _empty_book(book_name)
 
     agg["BookName"] = book_name
     return agg.reindex(columns=BOOK_COLUMNS)
@@ -642,3 +656,111 @@ def demo_book_summary(book: pd.DataFrame) -> str:
         else:
             bits.append(f"{r['RIC Name']} {size * 100:+.2f}%")
     return " · ".join(bits)
+
+
+# ---------------------------------------------------------------------------
+# Market Universe seed — one Size=0 template row per loaded asset
+# ---------------------------------------------------------------------------
+# The Editable Scenario tab uses these to build a "flat" scratch book from
+# whatever the Market layer has loaded — one strategy per asset, sizes at
+# zero. The user then edits only the sizes they actually want to trade, no
+# per-asset Add Position dance required. The engine already handles Size=0
+# rows correctly (they contribute nothing), so the same book flows through
+# Performance / Risk / Comparison without special-casing.
+def _universe_row(name: str, asset_class: str, book_name: str) -> dict:
+    return {
+        "BookName": book_name,
+        "Strategy": name,
+        "AssetClass": asset_class,
+        "RIC": name,
+        "RIC Name": name,
+        "Size": 0.0,
+        "EntryDate": pd.NaT,
+        "ExitDate": pd.NaT,
+        "Comment": "",
+        "TradeCount": 1,
+        "GrossUnderlyingSize": 0.0,
+    }
+
+
+def build_market_universe_book(
+    asset_names: Iterable[str],
+    registry: pd.DataFrame | None = None,
+    book_name: str = "Scenario",
+) -> pd.DataFrame:
+    """Build a template scenario book — one Strategy = asset row at Size 0.
+
+    ``asset_names`` should be canonical internal names (matching
+    ``RIC Name`` columns in the loaded market-data frames), not Yahoo
+    tickers. Pass the loaded registry to populate ``AssetClass`` per
+    row; without it the column stays empty.
+    """
+    from core.asset_registry import lookup as _reg_lookup  # local import: avoid cycle
+
+    names = [str(n).strip() for n in asset_names if str(n).strip()]
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
+    if not unique:
+        return _empty_book(book_name)
+
+    rows: list[dict] = []
+    for name in unique:
+        asset_class = ""
+        if registry is not None and not registry.empty:
+            entry = _reg_lookup(registry, name)
+            if entry is not None:
+                asset_class = entry.asset_class
+        rows.append(_universe_row(name, asset_class, book_name))
+
+    df = pd.DataFrame(rows, columns=BOOK_COLUMNS)
+    df["EntryDate"] = pd.to_datetime(df["EntryDate"], errors="coerce")
+    df["ExitDate"] = pd.to_datetime(df["ExitDate"], errors="coerce")
+    return df
+
+
+def sync_book_with_universe(
+    book: pd.DataFrame,
+    asset_names: Iterable[str],
+    registry: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Add any assets missing from ``book`` as new Size=0 rows.
+
+    Existing rows are preserved untouched — same sizes, same dates,
+    same comment. Assets already in the book (matched on
+    ``RIC Name``) are skipped. Assets in the book that are no longer
+    in ``asset_names`` are **not** removed, so a market-data refresh
+    can never delete a user's position.
+    """
+    from core.asset_registry import lookup as _reg_lookup  # local import: avoid cycle
+
+    if book is None or book.empty:
+        return build_market_universe_book(asset_names, registry, book_name="Scenario")
+
+    existing_names = set(book["RIC Name"].astype(str).tolist())
+    book_name = str(book["BookName"].iloc[0]) if "BookName" in book.columns and len(book) else "Scenario"
+
+    new_rows: list[dict] = []
+    for name in asset_names:
+        name = str(name).strip()
+        if not name or name in existing_names:
+            continue
+        asset_class = ""
+        if registry is not None and not registry.empty:
+            entry = _reg_lookup(registry, name)
+            if entry is not None:
+                asset_class = entry.asset_class
+        new_rows.append(_universe_row(name, asset_class, book_name))
+        existing_names.add(name)
+
+    if not new_rows:
+        return book
+
+    additions = pd.DataFrame(new_rows, columns=BOOK_COLUMNS)
+    additions["EntryDate"] = pd.to_datetime(additions["EntryDate"], errors="coerce")
+    additions["ExitDate"] = pd.to_datetime(additions["ExitDate"], errors="coerce")
+    return pd.concat([book, additions], ignore_index=True)
