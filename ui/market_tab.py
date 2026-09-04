@@ -222,7 +222,14 @@ def render(
         combined_cols += list(eq_prices.columns)
     if rates_levels is not None:
         combined_cols += list(rates_levels.columns)
-    combined_cols = sorted(set(map(str, combined_cols)))
+    combined_cols = list(map(str, combined_cols))
+    # Preserve registry (PM) order rather than alphabetical — matches
+    # the Scan Board and the Yahoo tab.
+    try:
+        _reg_for_order = reg.load_registry()
+    except Exception:  # noqa: BLE001
+        _reg_for_order = None
+    combined_cols = reg.ordered_loaded(_reg_for_order, combined_cols)
     if not combined_cols:
         st.info("Nothing to explore — no assets loaded.")
         return
@@ -298,24 +305,35 @@ def _available_presets(
     loaded_prices: list[str],
     loaded_rates: list[str],
 ) -> dict[str, list[str]]:
-    all_loaded = loaded_prices + loaded_rates
-    presets: dict[str, list[str]] = {"All loaded": sorted(all_loaded)}
+    """Family → asset-list mapping, preserving registry CSV order.
+
+    Every family that has at least one loaded asset becomes a
+    preset automatically — so adding a new family to the registry
+    (e.g. Commodities) picks it up without any UI code change.
+    ``All loaded`` and a compound ``FX + SPX`` shortcut are the two
+    special presets outside the family taxonomy.
+
+    Family lists follow registry CSV row order (which encodes the PM
+    ordering for FX and US Equities). Callers must never
+    ``sorted(...)`` these lists — CSV row order is the source of truth.
+    """
+    all_loaded_set = set(loaded_prices) | set(loaded_rates)
+    all_loaded_ordered = reg.ordered_loaded(registry, all_loaded_set)
+    presets: dict[str, list[str]] = {"All loaded": all_loaded_ordered}
     if registry is None or registry.empty:
         return presets
 
     fam_map = reg.by_family(registry)
-    fx_names = [n for n in fam_map.get("FX", []) if n in all_loaded]
-    eq_names = [n for n in fam_map.get("Equity Indices", []) if n in all_loaded]
-    rate_names = [n for n in fam_map.get("Rates", []) if n in all_loaded]
+    # fam_map values are already in registry (PM) order — do NOT sort.
+    for fam, names in fam_map.items():
+        loaded_names = [n for n in names if n in all_loaded_set]
+        if loaded_names:
+            presets[fam] = loaded_names
 
-    if fx_names:
-        presets["FX"] = sorted(fx_names)
-    if eq_names:
-        presets["Equity Indices"] = sorted(eq_names)
-    if rate_names:
-        presets["Rates"] = sorted(rate_names)
-    if fx_names and "SPX" in all_loaded:
-        presets["FX + SPX"] = sorted(fx_names + ["SPX"])
+    # Compound preset used by the FX cross-asset scan workflow.
+    fx_names = presets.get("FX", [])
+    if fx_names and "SPX" in all_loaded_set:
+        presets["FX + SPX"] = fx_names + ["SPX"]
     return presets
 
 
@@ -805,7 +823,12 @@ def _render_scan_board(
 
     # ---- Sort
     if sort_by == "Asset":
-        sorted_assets = sorted(contexts.keys())
+        # Preserve registry (PM) order rather than alphabetical — the FX
+        # family in particular has an explicit PM ordering (see
+        # `core.asset_registry.FX_YAHOO_ORDER`) that we must never
+        # re-shuffle. `contexts` is built by iterating `frames` which was
+        # built by iterating `universe`, itself in registry order.
+        sorted_assets = list(contexts.keys())
     else:
         def _sort_key(asset: str) -> float:
             metrics, supports, resistances, _ = contexts[asset]

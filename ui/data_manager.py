@@ -424,7 +424,10 @@ def _yahoo_fragment() -> None:
     grouped = reg.by_asset_class(registry)
 
     st.markdown("**Prices — additional assets (Equity + FX)**")
-    price_universe = sorted(
+    # Registry (PM) order — Equity block then FX block, both in CSV
+    # row order. Do NOT alphabetically re-sort; FX has an explicit PM
+    # ordering (see `core.asset_registry.FX_YAHOO_ORDER`).
+    price_universe = (
         [n for n in grouped.get("Equity", []) if reg.yahoo_tickers(registry, [n])]
         + [n for n in grouped.get("FX", []) if reg.yahoo_tickers(registry, [n])]
     )
@@ -453,9 +456,10 @@ def _yahoo_fragment() -> None:
             _rerun_app()
 
     st.markdown("**Rates — additional assets (yield levels)**")
-    rate_universe = sorted(
-        [n for n in grouped.get("Rate", []) if reg.yahoo_tickers(registry, [n])]
-    )
+    # Registry (CSV) order preserved.
+    rate_universe = [
+        n for n in grouped.get("Rate", []) if reg.yahoo_tickers(registry, [n])
+    ]
     rate_manual = st.multiselect(
         "Assets ",
         rate_universe,
@@ -554,20 +558,30 @@ def _yahoo_do_import(
     if silent:
         try:
             series = _yahoo_batch_cached(
-                tuple(sorted(tickers.items())),
+                # Preserve caller-side (registry / PM) order — cache keys
+                # stay stable because callers pass tickers in a
+                # deterministic order derived from the registry, and the
+                # downloaded frame's column order propagates to
+                # `eq_prices` / `rates_levels` via `to_close_frame`.
+                tuple(tickers.items()),
                 period,
                 interval,
-                tuple(sorted(asset_classes.items())),
+                tuple(asset_classes.items()),
             )
         except Exception:
             return False
     else:
         with st.spinner(f"Fetching {len(tickers)} tickers from Yahoo…"):
             series = _yahoo_batch_cached(
-                tuple(sorted(tickers.items())),
+                # Preserve caller-side (registry / PM) order — cache keys
+                # stay stable because callers pass tickers in a
+                # deterministic order derived from the registry, and the
+                # downloaded frame's column order propagates to
+                # `eq_prices` / `rates_levels` via `to_close_frame`.
+                tuple(tickers.items()),
                 period,
                 interval,
-                tuple(sorted(asset_classes.items())),
+                tuple(asset_classes.items()),
             )
 
     empties = [n for n, s in series.items() if s.ohlc.empty]
