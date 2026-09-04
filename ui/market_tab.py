@@ -331,14 +331,29 @@ def _render_explorer_single(
         metrics, supports, resistances = ctx
         _render_technical_metrics(asset, metrics, supports, resistances, is_rate, show_sr)
 
-    fig = _build_technical_chart(
-        asset, frame, start, end,
-        view_mode, chart_type, active_mas,
-        show_sr, show_rsi, is_rate,
-        large_mode=large_mode,
-        show_daily_returns=show_daily,
-        explorer_mode=True,
-    )
+    try:
+        fig = _build_technical_chart(
+            asset, frame, start, end,
+            view_mode, chart_type, active_mas,
+            show_sr, show_rsi, is_rate,
+            large_mode=large_mode,
+            show_daily_returns=show_daily,
+            explorer_mode=True,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Chart build should never crash the tab. Surface the reason
+        # (usually a Plotly quirk with subplot options) and fall back
+        # to a single-pane Line/Level chart so the user still gets
+        # something readable.
+        st.error(f"Chart build failed ({e}). Falling back to a plain line chart.")
+        fig = _build_technical_chart(
+            asset, frame, start, end,
+            "Level", "Line", [],
+            False, False, is_rate,
+            large_mode=large_mode,
+            show_daily_returns=False,
+            explorer_mode=True,
+        )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
@@ -840,15 +855,22 @@ def _build_technical_chart(
             badge_txt = _fmt_level(raw_last, False)
         badge_col = "#1f77b4"
 
+    # Faint dotted horizontal at the current level. Use the nested
+    # ``line=dict(...)`` form (safer across Plotly versions than the
+    # magic-underscore ``line_width=1`` shortcut when the call already
+    # carries a ``row`` / ``col`` for subplots).
     fig.add_hline(
-        y=last_y, line_dash="dot", line_color="#666666", opacity=0.4,
-        line_width=1, **price_row,
+        y=last_y, opacity=0.4,
+        line=dict(dash="dot", color="#666666", width=1),
+        **price_row,
     )
 
-    annot_kwargs = dict(
+    # Boxed badge on the right y-axis at the current level. For
+    # subplot figures we anchor it explicitly to the first pane via
+    # ``xref="x1 domain", yref="y1"``; for single-plot figures the
+    # unqualified ``"x domain"`` / ``"y"`` refer to the same axes.
+    _annot_common = dict(
         x=1.005, y=last_y,
-        xref=("x domain" if n_panels == 1 else "x1 domain"),
-        yref=("y" if n_panels == 1 else "y1"),
         text=f"<b>{badge_txt}</b>",
         showarrow=False,
         xanchor="left", yanchor="middle",
@@ -857,7 +879,10 @@ def _build_technical_chart(
         borderwidth=1, borderpad=3,
         font=dict(size=13, color=badge_col),
     )
-    fig.add_annotation(**annot_kwargs)
+    if n_panels > 1:
+        fig.add_annotation(xref="x1 domain", yref="y1", **_annot_common)
+    else:
+        fig.add_annotation(xref="x domain", yref="y", **_annot_common)
 
     # RSI sub-panel
     if include_rsi:
@@ -889,7 +914,11 @@ def _build_technical_chart(
             ),
             **daily_row,
         )
-        fig.add_hline(y=0, line_dash="solid", line_color="#999", opacity=0.35, line_width=1, **daily_row)
+        fig.add_hline(
+            y=0, opacity=0.35,
+            line=dict(dash="solid", color="#999", width=1),
+            **daily_row,
+        )
         fig.update_yaxes(side="right", **daily_row)
 
     fig.update_layout(
