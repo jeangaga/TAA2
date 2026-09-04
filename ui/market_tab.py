@@ -516,7 +516,7 @@ def _build_technical_chart(
         fig.add_hline(
             y=y, line_dash="dash", line_color="#d62728", opacity=0.55,
             annotation_text=annot, annotation_position="right",
-            annotation_font=dict(size=10, color="#d62728"),
+            annotation_font=dict(size=12, color="#d62728"),
             **price_row,
         )
     for lvl in supports:
@@ -525,7 +525,7 @@ def _build_technical_chart(
         fig.add_hline(
             y=y, line_dash="dash", line_color="#2ca02c", opacity=0.55,
             annotation_text=annot, annotation_position="right",
-            annotation_font=dict(size=10, color="#2ca02c"),
+            annotation_font=dict(size=12, color="#2ca02c"),
             **price_row,
         )
 
@@ -564,7 +564,7 @@ def _build_technical_chart(
         bgcolor="rgba(255,255,255,0.95)",
         bordercolor=badge_col,
         borderwidth=1, borderpad=3,
-        font=dict(size=11, color=badge_col),
+        font=dict(size=13, color=badge_col),
     )
     fig.add_annotation(**annot_kwargs)
 
@@ -595,7 +595,7 @@ def _build_technical_chart(
         legend=dict(
             orientation="h", yanchor="bottom", y=1.02,
             x=1.0, xanchor="right",
-            font=dict(size=10),
+            font=dict(size=12),
         ),
         hovermode="x unified",
         xaxis_rangeslider_visible=False,  # no OHLC bottom slider
@@ -645,7 +645,7 @@ def _render_technical_metrics(
 
     sep = "&nbsp;·&nbsp;"
     line1 = (
-        f"<span style='font-size:1.05rem;font-weight:600'>{asset}</span>"
+        f"<span style='font-size:1.25rem;font-weight:600'>{asset}</span>"
         f"&nbsp;&nbsp;&nbsp;<span style='color:#666'>Period</span> "
         f"{_fmt_signed(perf, unit, dec)}{sep}"
         f"<span style='color:#666'>1W</span> {_fmt_signed(w1, unit, dec)}{sep}"
@@ -657,8 +657,8 @@ def _render_technical_metrics(
         f"<span style='color:#666'>vs MA200</span> {_fmt_signed(vs200, unit, dec)}"
     )
     body = (
-        f"<div style='font-size:0.9rem;line-height:1.45;margin-bottom:2px'>{line1}</div>"
-        f"<div style='font-size:0.88rem;color:#333;line-height:1.35'>{line2}</div>"
+        f"<div style='font-size:0.95rem;line-height:1.5;margin-bottom:3px'>{line1}</div>"
+        f"<div style='font-size:0.92rem;color:#333;line-height:1.45'>{line2}</div>"
     )
 
     if show_sr and (supports or resistances or metrics.high is not None):
@@ -681,7 +681,7 @@ def _render_technical_metrics(
             )
         line3 = sep.join(parts)
         body += (
-            f"<div style='font-size:0.85rem;color:#444;line-height:1.35;"
+            f"<div style='font-size:0.9rem;color:#444;line-height:1.45;"
             f"margin-top:2px'>{line3}</div>"
         )
 
