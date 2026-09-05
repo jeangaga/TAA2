@@ -186,11 +186,14 @@ def _yahoo_batch_cached(
     period: str,
     interval: str,
     asset_class_pairs: tuple[tuple[str, str], ...],
+    transform_pairs: tuple[tuple[str, str], ...] = (),
 ):
     tickers = dict(ticker_pairs)
     asset_classes = dict(asset_class_pairs)
+    transforms = dict(transform_pairs)
     return yahoo_adapter.download_batch(
-        tickers, period=period, interval=interval, asset_classes=asset_classes
+        tickers, period=period, interval=interval,
+        asset_classes=asset_classes, transforms=transforms,
     )
 
 
@@ -354,10 +357,52 @@ def _upload_fragment() -> None:
     dec_col.metric("Decimal", meta["decimal"])
     r_col.metric("Rows detected", meta["rows"])
 
+    # For market-data files (Prices / Rates) auto-resolve raw column
+    # names to canonical InternalNames via the Asset Registry — no
+    # vendor prompt. Trades / Books files use their own column
+    # convention and are not renamed here.
+    resolution_report: list[dict] = []
+    unresolved: list[str] = []
+    if kind_key in ("eq", "rates"):
+        try:
+            registry = reg.load_registry()
+            id_map = reg.build_identifier_map(registry)
+            df, sources, unresolved = reg.normalize_columns(df, id_map)
+            # Build a compact resolution report for the preview.
+            for raw, src in sources.items():
+                if src == "internal":
+                    resolution_report.append({"Raw column": raw, "Resolved to": raw, "Source": "internal"})
+                else:
+                    # Find the InternalName after rename; the mapping
+                    # dict is in ``id_map`` (raw -> (internal, src)).
+                    resolution_report.append({
+                        "Raw column": raw,
+                        "Resolved to": id_map[raw][0],
+                        "Source": src,
+                    })
+            for raw in unresolved:
+                if raw and raw != "Date":
+                    resolution_report.append({"Raw column": raw, "Resolved to": "—", "Source": "unresolved"})
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Column auto-resolver skipped: {e}")
+
     st.caption(
-        f"Columns: {', '.join(map(str, meta['columns'][:12]))}"
-        + (" …" if len(meta["columns"]) > 12 else "")
+        f"Columns after resolve: {', '.join(map(str, df.columns[:12]))}"
+        + (" …" if len(df.columns) > 12 else "")
     )
+    if resolution_report:
+        st.markdown("**Column resolution**")
+        st.dataframe(
+            pd.DataFrame(resolution_report),
+            use_container_width=True, hide_index=True,
+        )
+        if unresolved:
+            st.warning(
+                "Unresolved columns kept with their raw names — add a "
+                "mapping to `data/asset_registry.csv` (or the "
+                "`KNOWN_VENDOR_IDS` overlay in `core/asset_registry.py`) "
+                "if you want them recognised."
+            )
     st.dataframe(df.head(10), use_container_width=True)
 
     if st.button(
@@ -370,7 +415,11 @@ def _upload_fragment() -> None:
             kind_key,
             payload,
             "upload",
-            {"filename": uploaded.name, **_summarise_csv(payload)},
+            {
+                "filename": uploaded.name,
+                "unresolved_columns": unresolved,
+                **_summarise_csv(payload),
+            },
         )
         st.success(f"{kind_label} slot replaced from upload · {uploaded.name}")
         _rerun_app()
@@ -421,6 +470,14 @@ def _yahoo_fragment() -> None:
     )
     st.caption(f"Core (always included): {core_display}")
 
+    # When the user picks FX, silently bundle FX Others too — LiveFX
+    # and other cross-family workflows depend on both being in market
+    # data. The two families remain visually distinct in the family
+    # selector, but a single Yahoo import covers both.
+    effective_families = list(selected_families)
+    if "FX" in effective_families and "FX Others" not in effective_families:
+        effective_families.append("FX Others")
+
     grouped = reg.by_asset_class(registry)
 
     st.markdown("**Prices — additional assets (Equity + FX)**")
@@ -440,7 +497,7 @@ def _yahoo_fragment() -> None:
     )
     price_effective = reg.resolve_universe(
         registry,
-        selected_families=selected_families,
+        selected_families=effective_families,
         manual=price_manual,
         asset_class_filter=("Equity", "FX"),
     )
@@ -469,7 +526,7 @@ def _yahoo_fragment() -> None:
     )
     rate_effective = reg.resolve_universe(
         registry,
-        selected_families=selected_families,
+        selected_families=effective_families,
         manual=rate_manual,
         asset_class_filter=("Rate",),
     )
@@ -555,6 +612,10 @@ def _yahoo_do_import(
         if e is not None:
             asset_classes[n] = e.asset_class
 
+    # Per-asset Yahoo transforms (currently just "inverse" for INRUSD /
+    # KRWUSD). Deterministic mapping — cache-key stable.
+    transforms = reg.yahoo_transforms(list(tickers.keys()))
+
     if silent:
         try:
             series = _yahoo_batch_cached(
@@ -567,21 +628,18 @@ def _yahoo_do_import(
                 period,
                 interval,
                 tuple(asset_classes.items()),
+                tuple(transforms.items()),
             )
         except Exception:
             return False
     else:
         with st.spinner(f"Fetching {len(tickers)} tickers from Yahoo…"):
             series = _yahoo_batch_cached(
-                # Preserve caller-side (registry / PM) order — cache keys
-                # stay stable because callers pass tickers in a
-                # deterministic order derived from the registry, and the
-                # downloaded frame's column order propagates to
-                # `eq_prices` / `rates_levels` via `to_close_frame`.
                 tuple(tickers.items()),
                 period,
                 interval,
                 tuple(asset_classes.items()),
+                tuple(transforms.items()),
             )
 
     empties = [n for n, s in series.items() if s.ohlc.empty]
