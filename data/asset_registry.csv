@@ -48,6 +48,11 @@ ZAR,USD/ZAR,FX,ZAR=X,pct_change,FX,EM,FALSE,,,
 CNH,USD/CNH,FX,CNH=X,pct_change,FX,EM,FALSE,,,
 NOKSEK,NOK/SEK,FX,NOKSEK=X,pct_change,FX,G10,FALSE,,,
 AUDNZD,AUD/NZD,FX,AUDNZD=X,pct_change,FX,G10,FALSE,,,
+EURJPY,EUR/JPY,FX,EURJPY=X,pct_change,FX Others,G10 Cross,FALSE,,,
+AUDJPY,AUD/JPY,FX,AUDJPY=X,pct_change,FX Others,G10 Cross,FALSE,,,
+GBPUSD,GBP/USD,FX,GBPUSD=X,pct_change,FX Others,G10,FALSE,,,
+INRUSD,INR/USD,FX,INR=X,pct_change,FX Others,EM Asia,FALSE,,,Inverted from USDINR via YAHOO_TRANSFORMS
+KRWUSD,KRW/USD,FX,KRW=X,pct_change,FX Others,EM Asia,FALSE,,,Inverted from USDKRW via YAHOO_TRANSFORMS
 UST 2Y,US Treasury 2Y Yield,Rate,,neg_dyield,Rates,US Curve,FALSE,,,No 2Y series on Yahoo
 UST 5Y,US Treasury 5Y Yield,Rate,^FVX,neg_dyield,Rates,US Curve,FALSE,,,
 UST 10Y,US Treasury 10Y Yield,Rate,^TNX,neg_dyield,Rates,US Curve,TRUE,0.20,US10Y,
