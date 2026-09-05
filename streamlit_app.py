@@ -163,7 +163,7 @@ def _canon_scenario(draft: pd.DataFrame, book_name: str = "Scenario") -> pd.Data
 # never see the UI form.
 # --------------------------------------------------------------------------
 _SCENARIO_DEFAULT_VISIBLE = ["Strategy", "RIC", "RIC Name", "Size"]
-_SCENARIO_OPTIONAL_COLS = ["EntryDate", "ExitDate", "Comment"]
+_SCENARIO_OPTIONAL_COLS = ["EntryDate", "EntryLevel", "ExitDate", "ExitLevel", "Comment"]
 
 
 def _row_is_rate(row, registry) -> bool:
@@ -903,7 +903,9 @@ with tabs[4]:
         with cols_toggle_col.popover("⚙ Columns", use_container_width=True):
             st.caption("Optional columns — hidden by default.")
             st.checkbox("EntryDate", key="scenario_show_entrydate", value=False)
+            st.checkbox("EntryLevel", key="scenario_show_entrylevel", value=False)
             st.checkbox("ExitDate", key="scenario_show_exitdate", value=False)
+            st.checkbox("ExitLevel", key="scenario_show_exitlevel", value=False)
             st.checkbox("Comment", key="scenario_show_comment", value=False)
 
         st.caption(
@@ -964,7 +966,15 @@ with tabs[4]:
                 help="Position size. FX / Equity: 1 = 1 % exposure. Rates: duration in years.",
             ),
             "EntryDate": st.column_config.DateColumn("EntryDate"),
+            "EntryLevel": st.column_config.NumberColumn(
+                "EntryLevel", format="%.4f",
+                help="Optional trade-level metadata: entry price/level. Not used by the engine.",
+            ),
             "ExitDate": st.column_config.DateColumn("ExitDate"),
+            "ExitLevel": st.column_config.NumberColumn(
+                "ExitLevel", format="%.4f",
+                help="Optional trade-level metadata: exit price/level. Not used by the engine.",
+            ),
             "Comment": st.column_config.TextColumn("Comment"),
         }
 
