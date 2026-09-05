@@ -48,13 +48,21 @@ BOOK_COLUMNS: List[str] = [
     "RIC Name",
     "Size",
     "EntryDate",
+    "EntryLevel",
     "ExitDate",
+    "ExitLevel",
     "Comment",
     # Diagnostics — populated when a book is derived from a multi-trade
     # aggregation. Not required on imported or manually-edited books.
     "TradeCount",
     "GrossUnderlyingSize",
 ]
+
+# Optional metadata columns preserved by ``canonicalize_book`` but
+# never used as aggregation keys and never fed into the engine.
+# Existing CSV / TXT books that don't have these columns stay valid —
+# missing values default to NaN.
+BOOK_OPTIONAL_METADATA: List[str] = ["EntryLevel", "ExitLevel"]
 
 BOOKS_CSV_REQUIRED: List[str] = [
     "BookName", "Strategy", "RIC", "RIC Name", "Size", "EntryDate",
@@ -75,6 +83,8 @@ def _ensure_book_columns(df: pd.DataFrame, book_name: str) -> pd.DataFrame:
     for col in BOOK_COLUMNS:
         if col not in df.columns:
             if col in ("Size", "TradeCount", "GrossUnderlyingSize"):
+                df[col] = np.nan
+            elif col in BOOK_OPTIONAL_METADATA:
                 df[col] = np.nan
             elif col in ("EntryDate", "ExitDate"):
                 df[col] = pd.NaT
@@ -181,6 +191,14 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     if "Comment" not in df.columns:
         df["Comment"] = ""
 
+    # Optional metadata columns — preserved if present, defaulted to
+    # NaN otherwise. Existing files without them stay valid.
+    for col in BOOK_OPTIONAL_METADATA:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+
     df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
     df = df.dropna(subset=["Size"])
     df = df[df["BookName"] != ""]
@@ -190,16 +208,18 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
         book = _ensure_book_columns(sub, name)
         # Aggregate: same Strategy x RIC x RIC Name should be one row,
         # even in an imported Books.csv. Preserve first AssetClass /
-        # Comment / dates as a reasonable default.
+        # Comment / dates / levels as a reasonable default.
         keys = ["Strategy", "RIC", "RIC Name"]
         agg = (
-            book.groupby(keys, dropna=False)
+            book.groupby(keys, dropna=False, sort=False)
             .agg(
                 Size=("Size", "sum"),
                 TradeCount=("Size", "count"),
                 GrossUnderlyingSize=("Size", lambda s: float(np.abs(s).sum())),
                 EntryDate=("EntryDate", "min"),
                 ExitDate=("ExitDate", "max"),
+                EntryLevel=("EntryLevel", "first"),
+                ExitLevel=("ExitLevel", "first"),
                 AssetClass=("AssetClass", "first"),
                 Comment=("Comment", "first"),
             )
@@ -282,6 +302,15 @@ def canonicalize_book(
         else:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
+    # Optional metadata (per BOOK_OPTIONAL_METADATA) — never used as
+    # aggregation keys, coerced to numeric so the editor / display
+    # formats them consistently.
+    for col in BOOK_OPTIONAL_METADATA:
+        if col not in df.columns:
+            df[col] = np.nan
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     if "Size" not in df.columns:
         df["Size"] = np.nan
     df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
@@ -311,6 +340,12 @@ def canonicalize_book(
     # explicit PM ordering (see ``core.asset_registry.FX_YAHOO_ORDER``)
     # that would otherwise be re-alphabetized by ``groupby``. This
     # affects only row order — aggregation semantics are unchanged.
+    def _first_non_nan(series: pd.Series):
+        for v in series:
+            if pd.notna(v):
+                return v
+        return np.nan
+
     agg = (
         df.groupby(keys, dropna=False, sort=False)
         .agg(
@@ -319,6 +354,8 @@ def canonicalize_book(
             GrossUnderlyingSize=("Size", lambda s: float(np.abs(s).sum())),
             EntryDate=("EntryDate", "min"),
             ExitDate=("ExitDate", "max"),
+            EntryLevel=("EntryLevel", _first_non_nan),
+            ExitLevel=("ExitLevel", _first_non_nan),
             AssetClass=("AssetClass", _first_non_empty),
             Comment=("Comment", _first_non_empty),
         )

@@ -90,6 +90,32 @@ FX_YAHOO_ORDER: list[str] = [
 ]
 FX_YAHOO_RANK: dict[str, int] = {name: idx for idx, name in enumerate(FX_YAHOO_ORDER)}
 
+# Explicit PM ordering — Yahoo "FX Others" universe (crosses + EM Asia
+# that need Yahoo inversion). Same source-of-truth rule as the main FX
+# list: CSV row order is authoritative; this constant is the assertion
+# / documentation copy. Unknown / new FX-Other assets append after
+# ``KRWUSD`` in their existing relative order.
+FX_OTHERS_ORDER: list[str] = [
+    "EURJPY",   # EUR/JPY  (Yahoo direct EURJPY=X)
+    "AUDJPY",   # AUD/JPY  (Yahoo direct AUDJPY=X)
+    "GBPUSD",   # GBP/USD  (Yahoo direct GBPUSD=X)
+    "INRUSD",   # INR/USD  (inverted from USDINR — Yahoo INR=X)
+    "KRWUSD",   # KRW/USD  (inverted from USDKRW — Yahoo KRW=X)
+]
+FX_OTHERS_RANK: dict[str, int] = {name: idx for idx, name in enumerate(FX_OTHERS_ORDER)}
+
+# Yahoo-specific post-download transforms per canonical asset. Kept out
+# of the CSV so the transform stays a Yahoo-adapter concern (GitHub /
+# Upload sources ingest their own convention untouched).
+#
+# Supported transforms:
+#   "inverse"  — take the reciprocal of the OHLC series with proper
+#                High/Low swap (see `core.adapters.yahoo._invert_ohlc`).
+YAHOO_TRANSFORMS: dict[str, str] = {
+    "INRUSD": "inverse",
+    "KRWUSD": "inverse",
+}
+
 # Explicit PM ordering — Yahoo US Equities universe.
 # Top-down macro-scanning order: broad indices first, then mega-cap
 # tech, semis, financials, consumer, industrials, energy, healthcare.
@@ -223,6 +249,19 @@ def yahoo_tickers(registry: pd.DataFrame, names: Iterable[str] | None = None) ->
         df = df[df["InternalName"].isin(wanted)]
     df = df[df["YahooTicker"] != ""]
     return dict(zip(df["InternalName"], df["YahooTicker"]))
+
+
+def yahoo_transforms(names: Iterable[str] | None = None) -> dict[str, str]:
+    """Return ``{InternalName: transform_str}`` for assets that need one.
+
+    Reads from the module-level :data:`YAHOO_TRANSFORMS` map.
+    Restricted to ``names`` when provided. Assets without a transform
+    entry are omitted (the download layer defaults to identity).
+    """
+    if names is None:
+        return dict(YAHOO_TRANSFORMS)
+    wanted = set(names)
+    return {n: t for n, t in YAHOO_TRANSFORMS.items() if n in wanted}
 
 
 def by_asset_class(registry: pd.DataFrame) -> dict[str, list[str]]:
