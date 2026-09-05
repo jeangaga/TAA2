@@ -49,6 +49,9 @@ REGISTRY_COLUMNS = [
     "DisplayName",
     "AssetClass",
     "YahooTicker",
+    "Reuters",       # Reuters RIC (e.g. "US5YT=RR", "EUR=")
+    "Bloomberg",     # Bloomberg ticker (e.g. "EURUSD Curncy", "USGG5YR Index")
+    "FactSet",       # FactSet identifier — optional
     "ReturnMethod",
     "Family",
     "Subfamily",
@@ -57,6 +60,28 @@ REGISTRY_COLUMNS = [
     "DemoStrategy",
     "Notes",
 ]
+
+# Vendor-identifier columns eligible for the resolver — order matters
+# only for the "detected source" label reported to the UI (first match
+# wins during registry initialisation).
+VENDOR_ID_FIELDS: list[str] = ["YahooTicker", "Reuters", "Bloomberg", "FactSet"]
+VENDOR_SOURCE_LABEL: dict[str, str] = {
+    "YahooTicker": "yahoo",
+    "Reuters": "reuters",
+    "Bloomberg": "bloomberg",
+    "FactSet": "factset",
+}
+
+# Convenience overlay so the CSV doesn't have to be rewritten every
+# time we learn a vendor identifier for one asset. The CSV column
+# always wins if it is non-empty; this map only fills blanks.
+KNOWN_VENDOR_IDS: dict[str, dict[str, str]] = {
+    # Reuters US Treasury yield RICs — pulled from the legacy Books.csv
+    # examples that shipped with the app.
+    "UST 5Y":  {"Reuters": "US5YT=RR"},
+    "UST 10Y": {"Reuters": "US10YT=RR"},
+    "UST 30Y": {"Reuters": "US30YT=RR"},
+}
 
 VALID_ASSET_CLASSES = {"Equity", "FX", "Rate"}
 VALID_RETURN_METHODS = {"pct_change", "neg_dyield"}
@@ -199,6 +224,18 @@ def load_registry(path: str | Path | None = None) -> pd.DataFrame:
         df["ReturnMethod"].isin(VALID_RETURN_METHODS), other=""
     )
     df = df[(df["AssetClass"] != "") & (df["ReturnMethod"] != "")].reset_index(drop=True)
+
+    # Overlay KNOWN_VENDOR_IDS onto blank vendor cells (CSV always wins
+    # when non-empty). Keeps the CSV small: only fill vendor IDs we
+    # actually know, and extend the map here without rewriting the CSV.
+    for internal_name, overlays in KNOWN_VENDOR_IDS.items():
+        mask = df["InternalName"] == internal_name
+        if not mask.any():
+            continue
+        for field, value in overlays.items():
+            if field not in df.columns:
+                continue
+            df.loc[mask & (df[field] == ""), field] = value
 
     df["_DefaultCoreBool"] = df["DefaultCore"].str.upper().isin(TRUE_TOKENS)
     df["_DemoSizeNum"] = df["DemoSize"].apply(_coerce_float)
@@ -405,6 +442,114 @@ def resolve_universe(
 
     tickered = set(yahoo_tickers(registry, names).keys())
     return [n for n in names if n in tickered]
+
+
+# --------------------------------------------------------------------------
+# Identifier resolver — the bridge from vendor tickers to InternalName.
+# --------------------------------------------------------------------------
+def build_identifier_map(registry: pd.DataFrame) -> dict[str, tuple[str, str]]:
+    """Return ``{external_id: (internal_name, source)}`` for every known ID.
+
+    Includes the canonical ``InternalName`` itself as its own key with
+    source ``"internal"``. Vendor identifiers (``YahooTicker``,
+    ``Reuters``, ``Bloomberg``, ``FactSet``) are added when they are
+    non-empty in the registry. Raises ``ValueError`` if the same
+    external identifier resolves to two different ``InternalName``s —
+    surfacing a data-quality error early rather than silently picking
+    one.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for _, r in registry.iterrows():
+        internal = str(r["InternalName"]).strip()
+        if not internal:
+            continue
+        prior = out.get(internal)
+        if prior is not None and prior[0] != internal:
+            raise ValueError(
+                f"Registry collision on {internal!r}: also maps to {prior[0]!r}"
+            )
+        out[internal] = (internal, "internal")
+        for field in VENDOR_ID_FIELDS:
+            if field not in registry.columns:
+                continue
+            ext = str(r.get(field, "") or "").strip()
+            if not ext:
+                continue
+            prior = out.get(ext)
+            if prior is not None and prior[0] != internal:
+                raise ValueError(
+                    f"Registry collision: identifier {ext!r} maps to both "
+                    f"{prior[0]!r} and {internal!r}"
+                )
+            out[ext] = (internal, VENDOR_SOURCE_LABEL[field])
+    return out
+
+
+def resolve_columns(
+    columns: Iterable[str],
+    id_map: dict[str, tuple[str, str]],
+) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Resolve raw column names to canonical InternalNames.
+
+    Returns three parallel structures:
+
+    * ``mapping``     — ``{raw_column: internal_name}`` for resolved columns.
+    * ``sources``     — ``{raw_column: source_label}`` — where the raw name
+                        came from (``"yahoo"`` / ``"reuters"`` / ``"internal"`` …).
+    * ``unresolved``  — list of columns not found in ``id_map``, preserved
+                        in input order.
+
+    Per-column resolution — no attempt to classify the whole file as
+    "Reuters" or "Bloomberg". A file mixing ``EURUSD=X`` (Yahoo) and
+    ``US5YT=RR`` (Reuters) resolves both correctly.
+    """
+    mapping: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    unresolved: list[str] = []
+    for col in columns:
+        c = str(col).strip()
+        if not c:
+            unresolved.append(c)
+            continue
+        if c in id_map:
+            internal, src = id_map[c]
+            mapping[c] = internal
+            sources[c] = src
+        else:
+            unresolved.append(c)
+    return mapping, sources, unresolved
+
+
+def normalize_columns(
+    df: pd.DataFrame,
+    id_map: dict[str, tuple[str, str]],
+    *,
+    preserve: Iterable[str] = ("Date",),
+) -> tuple[pd.DataFrame, dict[str, str], list[str]]:
+    """Rename ``df`` columns in place-safe fashion using ``id_map``.
+
+    Columns in ``preserve`` pass through untouched (typically the date
+    key). Unresolved columns keep their raw name. Returns
+    ``(new_df, sources_by_original_col, unresolved_list)``.
+
+    When two raw columns resolve to the same ``InternalName``, the
+    later occurrence overwrites (the returned frame has that column
+    only once) — this is the intended behaviour when a file lists e.g.
+    both ``EURUSD=X`` and ``EUR`` for the same underlying series.
+    """
+    preserve_set = set(preserve)
+    cols = list(df.columns)
+    mapping, sources, unresolved = resolve_columns(
+        [c for c in cols if c not in preserve_set], id_map
+    )
+    new_columns = [mapping.get(c, c) for c in cols]
+    out = df.copy()
+    out.columns = new_columns
+    # Drop duplicate columns from the tail so the first canonical hit
+    # survives (typical: user's already-canonical column wins over a
+    # trailing vendor duplicate).
+    out = out.loc[:, ~out.columns.duplicated(keep="first")]
+    return out, sources, unresolved
 
 
 if __name__ == "__main__":  # pragma: no cover - manual sanity check

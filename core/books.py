@@ -44,8 +44,9 @@ BOOK_COLUMNS: List[str] = [
     "BookName",
     "Strategy",
     "AssetClass",
-    "RIC",
-    "RIC Name",
+    "Asset",       # canonical, vendor-independent identifier (== registry InternalName)
+    "RIC",         # legacy shadow — always synchronised to Asset for engine compat
+    "RIC Name",    # legacy shadow — always synchronised to Asset for engine compat
     "Size",
     "EntryDate",
     "EntryLevel",
@@ -64,6 +65,13 @@ BOOK_COLUMNS: List[str] = [
 # missing values default to NaN.
 BOOK_OPTIONAL_METADATA: List[str] = ["EntryLevel", "ExitLevel"]
 
+# Legacy shadow columns kept in-memory for backward compatibility with
+# the portfolio engine (``core.portfolio.build_strategy_returns``) and
+# helpers that still read ``RIC Name``. They are ALWAYS mirrored to
+# ``Asset`` by :func:`canonicalize_book`, and never persisted to disk
+# — :func:`book_to_books_csv` drops them from the output.
+BOOK_LEGACY_MIRROR: List[str] = ["RIC", "RIC Name"]
+
 BOOKS_CSV_REQUIRED: List[str] = [
     "BookName", "Strategy", "RIC", "RIC Name", "Size", "EntryDate",
 ]
@@ -74,6 +82,29 @@ def _empty_book(book_name: str = "") -> pd.DataFrame:
     df["BookName"] = df["BookName"].astype(object)
     if book_name:
         df.attrs["BookName"] = book_name
+    return df
+
+
+def _sync_asset_mirror(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure ``Asset`` is populated and the ``RIC`` / ``RIC Name``
+    legacy shadows mirror it.
+
+    Precedence when reconciling: non-empty ``Asset`` wins; else
+    ``RIC Name``; else ``RIC``. Whatever wins is written back to all
+    three so the engine (which still reads ``RIC Name``) sees the
+    same canonical value as the persistence layer (which reads
+    ``Asset``).
+    """
+    for col in ("Asset", "RIC", "RIC Name"):
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].astype(str).fillna("").str.strip()
+    # Pick the canonical value per row.
+    asset = df["Asset"].where(df["Asset"] != "", df["RIC Name"])
+    asset = asset.where(asset != "", df["RIC"])
+    df["Asset"] = asset
+    df["RIC"] = asset
+    df["RIC Name"] = asset
     return df
 
 
@@ -91,6 +122,7 @@ def _ensure_book_columns(df: pd.DataFrame, book_name: str) -> pd.DataFrame:
             else:
                 df[col] = ""
     df["BookName"] = book_name
+    df = _sync_asset_mirror(df)
     return df[BOOK_COLUMNS]
 
 
@@ -157,6 +189,10 @@ def trades_to_live_book(
     agg["BookName"] = book_name
     agg["AssetClass"] = ""
     agg["Comment"] = ""
+    # Trades.csv predates the canonical Asset column, so we derive
+    # Asset from the trade blotter's RIC Name (which the app has
+    # always used as the market-data key).
+    agg["Asset"] = agg["RIC Name"]
     return agg.reindex(columns=BOOK_COLUMNS)
 
 
@@ -173,9 +209,18 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     df = pd.read_csv(io.BytesIO(file_bytes))
     df = df.drop(columns=[c for c in df.columns if "Unnamed" in str(c)], errors="ignore")
 
-    missing = [c for c in BOOKS_CSV_REQUIRED if c not in df.columns]
-    if missing:
-        raise ValueError(f"Books.csv is missing required columns: {missing}")
+    # New (preferred) schema uses ``Asset``; legacy schema uses
+    # ``RIC Name``. Accept either — files migrate over time.
+    has_asset = "Asset" in df.columns
+    has_ric_name = "RIC Name" in df.columns
+    if not (has_asset or has_ric_name):
+        raise ValueError(
+            "Books.csv must contain either an 'Asset' column (new schema) "
+            "or a 'RIC Name' column (legacy schema)."
+        )
+    for c in ("BookName", "Strategy", "Size", "EntryDate"):
+        if c not in df.columns:
+            raise ValueError(f"Books.csv is missing required column: {c!r}")
 
     for col in ("EntryDate", "ExitDate"):
         if col in df.columns:
@@ -183,8 +228,20 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
         else:
             df[col] = pd.NaT
 
-    for col in ("BookName", "Strategy", "RIC", "RIC Name"):
+    # Populate the canonical Asset column from whichever schema the file
+    # uses; then materialise the RIC / RIC Name legacy shadows so the
+    # engine sees them.
+    if not has_asset:
+        df["Asset"] = df["RIC Name"]
+    for col in ("Asset", "RIC", "RIC Name"):
+        if col not in df.columns:
+            df[col] = df["Asset"] if col != "Asset" else ""
+    for col in ("BookName", "Strategy", "Asset", "RIC", "RIC Name"):
         df[col] = df[col].astype(str).str.strip()
+    # Any blank Asset falls back to the legacy shadow if present.
+    df["Asset"] = df["Asset"].where(df["Asset"] != "", df["RIC Name"])
+    df["RIC Name"] = df["Asset"]
+    df["RIC"] = df["Asset"]
 
     if "AssetClass" not in df.columns:
         df["AssetClass"] = ""
@@ -206,10 +263,8 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
     for name, sub in df.groupby("BookName"):
         book = _ensure_book_columns(sub, name)
-        # Aggregate: same Strategy x RIC x RIC Name should be one row,
-        # even in an imported Books.csv. Preserve first AssetClass /
-        # Comment / dates / levels as a reasonable default.
-        keys = ["Strategy", "RIC", "RIC Name"]
+        # Aggregate on the canonical (Strategy, Asset) key.
+        keys = ["Strategy", "Asset"]
         agg = (
             book.groupby(keys, dropna=False, sort=False)
             .agg(
@@ -226,12 +281,25 @@ def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
             .reset_index()
         )
         agg["BookName"] = name
+        agg["RIC"] = agg["Asset"]
+        agg["RIC Name"] = agg["Asset"]
         out[name] = agg.reindex(columns=BOOK_COLUMNS)
     return out
 
 
 def book_to_books_csv(books: Dict[str, pd.DataFrame]) -> bytes:
-    """Serialise a {name: book} dict back to the Books.csv schema."""
+    """Serialise a {name: book} dict back to the new Books.csv schema.
+
+    Persistence columns (in this order):
+
+        BookName, Strategy, AssetClass, Asset, Size,
+        EntryDate, EntryLevel, ExitDate, ExitLevel, Comment
+
+    ``RIC`` / ``RIC Name`` are DROPPED — the persisted book uses only
+    ``Asset`` (== registry InternalName). Diagnostic columns
+    (``TradeCount``, ``GrossUnderlyingSize``) are also dropped; they
+    are recomputed on load / canonicalize.
+    """
     if not books:
         return b""
     frames = []
@@ -240,11 +308,20 @@ def book_to_books_csv(books: Dict[str, pd.DataFrame]) -> bytes:
             continue
         b = book.copy()
         b["BookName"] = name
+        # Fill Asset from the RIC-Name shadow if the book pre-dates the
+        # new schema.
+        if "Asset" not in b.columns or (b["Asset"].astype(str).str.strip() == "").all():
+            if "RIC Name" in b.columns:
+                b["Asset"] = b["RIC Name"]
         frames.append(b)
     if not frames:
         return b""
     out = pd.concat(frames, ignore_index=True, sort=False)
-    out = out.reindex(columns=[c for c in BOOK_COLUMNS if c in out.columns])
+    persist_cols = [
+        "BookName", "Strategy", "AssetClass", "Asset", "Size",
+        "EntryDate", "EntryLevel", "ExitDate", "ExitLevel", "Comment",
+    ]
+    out = out.reindex(columns=[c for c in persist_cols if c in out.columns])
     for col in ("EntryDate", "ExitDate"):
         if col in out.columns:
             out[col] = pd.to_datetime(out[col], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -291,10 +368,14 @@ def canonicalize_book(
 
     df = book.copy()
 
-    for col in ("Strategy", "RIC", "RIC Name", "AssetClass", "Comment"):
+    for col in ("Strategy", "AssetClass", "Comment"):
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].astype(str).fillna("").str.strip()
+
+    # Reconcile Asset / RIC / RIC Name into a single canonical value
+    # per row before we use them as aggregation keys.
+    df = _sync_asset_mirror(df)
 
     for col in ("EntryDate", "ExitDate"):
         if col not in df.columns:
@@ -315,10 +396,12 @@ def canonicalize_book(
         df["Size"] = np.nan
     df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
 
-    # Reject malformed rows so the engine never sees them.
+    # Reject malformed rows so the engine never sees them. ``Asset``
+    # is now the canonical identifier column; ``RIC Name`` is only a
+    # legacy mirror maintained for the engine's benefit.
     valid = (
         ~df["Strategy"].isin(MISSING_STRATEGY_TOKENS)
-        & ~df["RIC Name"].isin(MISSING_STRATEGY_TOKENS)
+        & ~df["Asset"].isin(MISSING_STRATEGY_TOKENS)
         & df["Size"].notna()
     )
     if not keep_zero_size:
@@ -334,12 +417,12 @@ def canonicalize_book(
                 return v
         return ""
 
-    keys = ["Strategy", "RIC", "RIC Name"]
-    # `sort=False` preserves the caller's row order (first-appearance
-    # of each key). Important for the FX universe, which follows an
-    # explicit PM ordering (see ``core.asset_registry.FX_YAHOO_ORDER``)
-    # that would otherwise be re-alphabetized by ``groupby``. This
-    # affects only row order — aggregation semantics are unchanged.
+    # Group by (Strategy, Asset) — the true canonical key. Legacy
+    # ``RIC`` / ``RIC Name`` columns are just mirrors and get
+    # re-populated from ``Asset`` after aggregation. ``sort=False``
+    # preserves the caller's row order (first-appearance of each key).
+    keys = ["Strategy", "Asset"]
+
     def _first_non_nan(series: pd.Series):
         for v in series:
             if pd.notna(v):
@@ -369,6 +452,11 @@ def canonicalize_book(
             return _empty_book(book_name)
 
     agg["BookName"] = book_name
+    # Re-mirror the legacy RIC / RIC Name shadows onto Asset so the
+    # engine and every downstream consumer that still reads them
+    # gets the same canonical value as `Asset`.
+    agg["RIC"] = agg["Asset"]
+    agg["RIC Name"] = agg["Asset"]
     return agg.reindex(columns=BOOK_COLUMNS)
 
 
