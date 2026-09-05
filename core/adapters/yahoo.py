@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
+import numpy as np
 import pandas as pd
 
 from core.adapters.base import MarketSeries
@@ -31,7 +32,7 @@ def _import_yfinance():
     return yf
 
 
-OHLC_FIELDS = ("Open", "High", "Low", "Close", "Volume")
+OHLC_FIELDS = ("Open", "High", "Low", "Close", "Adj Close", "Volume")
 
 
 def _empty_ohlc() -> pd.DataFrame:
@@ -72,6 +73,10 @@ def _normalise_ohlc(raw: pd.DataFrame) -> pd.DataFrame:
     df = df[cols].copy()
     if "Volume" not in df.columns:
         df["Volume"] = pd.NA
+    if "Adj Close" not in df.columns and "Close" in df.columns:
+        # Fall back to Close when the source doesn't provide an adjusted
+        # series — keeps the frame shape stable for downstream consumers.
+        df["Adj Close"] = df["Close"]
     # Duplicate column labels can appear when yfinance emits both a
     # single-level and a MultiIndex flattened view (rare, but crashes
     # the reindex below with `cannot reindex on an axis with duplicates`).
@@ -144,32 +149,121 @@ def download_one(
     )
 
 
+def _invert_ohlc(df: pd.DataFrame) -> pd.DataFrame:
+    """Invert an OHLC frame in place-safe fashion.
+
+    For an inverse series (e.g. INRUSD = 1 / USDINR):
+
+    * inverse Open  = 1 / original Open
+    * inverse Close = 1 / original Close
+    * inverse High  = 1 / original Low   ← swap!
+    * inverse Low   = 1 / original High  ← swap!
+    * inverse Adj Close = 1 / original Adj Close
+    * Volume passes through unchanged (FX has no meaningful volume)
+
+    Any resulting inf/-inf (division by zero) is coerced to NaN and
+    the row is retained; ``dropna`` on Close in the caller removes it.
+    """
+    if df is None or df.empty:
+        return df
+    out = pd.DataFrame(index=df.index)
+
+    def _inv(series):
+        r = 1.0 / series
+        return r.replace([np.inf, -np.inf], pd.NA)
+
+    if "Open" in df.columns:
+        out["Open"] = _inv(df["Open"])
+    if "High" in df.columns and "Low" in df.columns:
+        # High and Low SWAP when inverting.
+        out["High"] = _inv(df["Low"])
+        out["Low"] = _inv(df["High"])
+    elif "High" in df.columns:
+        out["High"] = _inv(df["High"])
+    elif "Low" in df.columns:
+        out["Low"] = _inv(df["Low"])
+    if "Close" in df.columns:
+        out["Close"] = _inv(df["Close"])
+    if "Adj Close" in df.columns:
+        out["Adj Close"] = _inv(df["Adj Close"])
+    if "Volume" in df.columns:
+        out["Volume"] = df["Volume"]
+    return out.reindex(columns=list(OHLC_FIELDS))
+
+
+def _apply_transform(df: pd.DataFrame, transform: str | None) -> pd.DataFrame:
+    """Dispatch to the right post-download transformation."""
+    if not transform:
+        return df
+    if transform == "inverse":
+        return _invert_ohlc(df)
+    # Unknown transforms are ignored rather than raising — the source
+    # ticker is still useful even if the transform label was mistyped.
+    return df
+
+
 def download_batch(
     tickers: Mapping[str, str],
     period: str = "1y",
     interval: str = "1d",
     *,
     asset_classes: Mapping[str, str] | None = None,
+    transforms: Mapping[str, str] | None = None,
 ) -> dict[str, MarketSeries]:
     """Download many tickers. ``tickers`` maps ``internal_name → yahoo_ticker``.
+
+    ``transforms`` optionally maps ``internal_name → transform_str``
+    (currently ``"inverse"``) applied after the raw Yahoo frame is
+    normalised. Used for canonical assets whose Yahoo series comes in
+    the opposite quotation convention (INRUSD, KRWUSD).
 
     Returns ``{internal_name: MarketSeries}``. Tickers that yield an
     empty frame are included with ``ohlc`` empty so the UI can flag
     them; failures do not abort the batch.
     """
     asset_classes = asset_classes or {}
+    transforms = transforms or {}
     out: dict[str, MarketSeries] = {}
+    # De-duplicate tickers so an underlying series requested for two
+    # canonical assets (e.g. GBPUSD listed in both FX and FX Others in
+    # some future extension) is downloaded once and re-used.
+    ticker_cache: dict[str, MarketSeries] = {}
     for name, ticker in tickers.items():
         if not ticker:
             continue
         try:
-            out[name] = download_one(
-                ticker,
-                period=period,
-                interval=interval,
-                name=name,
-                asset_class=asset_classes.get(name, ""),
-            )
+            if ticker in ticker_cache:
+                cached = ticker_cache[ticker]
+                series = MarketSeries(
+                    name=name,
+                    asset_class=asset_classes.get(name, ""),
+                    source="yahoo",
+                    ohlc=cached.ohlc.copy() if not cached.ohlc.empty else cached.ohlc,
+                    metadata=dict(cached.metadata),
+                )
+            else:
+                series = download_one(
+                    ticker,
+                    period=period,
+                    interval=interval,
+                    name=name,
+                    asset_class=asset_classes.get(name, ""),
+                )
+                ticker_cache[ticker] = series
+            # Apply any per-asset post-download transform (e.g. inverse
+            # for INRUSD/KRWUSD). Transform runs on a COPY so the
+            # cached identity frame isn't corrupted for the next reuse.
+            xf = transforms.get(name)
+            if xf and not series.ohlc.empty:
+                new_ohlc = _apply_transform(series.ohlc.copy(), xf)
+                series = MarketSeries(
+                    name=series.name,
+                    asset_class=series.asset_class,
+                    source=series.source,
+                    ohlc=new_ohlc,
+                    metadata={**series.metadata, "transform": xf},
+                )
+            out[name] = series
         except Exception as e:  # noqa: BLE001 - surface failures to UI, don't abort batch
             out[name] = MarketSeries(
                 name=name,
