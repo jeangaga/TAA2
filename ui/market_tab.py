@@ -865,12 +865,14 @@ def _build_technical_chart(
         **price_row,
     )
 
-    # Boxed badge on the right y-axis at the current level. For
-    # subplot figures we anchor it explicitly to the first pane via
-    # ``xref="x1 domain", yref="y1"``; for single-plot figures the
-    # unqualified ``"x domain"`` / ``"y"`` refer to the same axes.
-    _annot_common = dict(
+    # Boxed badge on the right y-axis at the current level. Plotly's
+    # xref/yref regex is `^x([2-9]|[1-9][0-9]+)?( domain)?$` — the
+    # FIRST axis is literally ``"x"`` (never ``"x1"``), so the same
+    # ``"x domain"`` / ``"y"`` refs bind to the first (price) pane
+    # whether the figure is single-plot or multi-subplot.
+    fig.add_annotation(
         x=1.005, y=last_y,
+        xref="x domain", yref="y",
         text=f"<b>{badge_txt}</b>",
         showarrow=False,
         xanchor="left", yanchor="middle",
@@ -879,10 +881,6 @@ def _build_technical_chart(
         borderwidth=1, borderpad=3,
         font=dict(size=13, color=badge_col),
     )
-    if n_panels > 1:
-        fig.add_annotation(xref="x1 domain", yref="y1", **_annot_common)
-    else:
-        fig.add_annotation(xref="x domain", yref="y", **_annot_common)
 
     # RSI sub-panel
     if include_rsi:
