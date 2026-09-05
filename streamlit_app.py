@@ -162,7 +162,7 @@ def _canon_scenario(draft: pd.DataFrame, book_name: str = "Scenario") -> pd.Data
 # boundary — the scenario_book, Books.csv, Trades.csv and the engine
 # never see the UI form.
 # --------------------------------------------------------------------------
-_SCENARIO_DEFAULT_VISIBLE = ["Strategy", "RIC", "RIC Name", "Size"]
+_SCENARIO_DEFAULT_VISIBLE = ["Strategy", "Asset", "Size"]
 _SCENARIO_OPTIONAL_COLS = ["EntryDate", "EntryLevel", "ExitDate", "ExitLevel", "Comment"]
 
 
@@ -182,9 +182,12 @@ def _row_is_rate(row, registry) -> bool:
     be a 20 % equity long or a 0.20y duration rates position; only
     the asset class disambiguates.
     """
-    rn = str(row.get("RIC Name", "") or "").strip()
-    if registry is not None and not (hasattr(registry, "empty") and registry.empty) and rn:
-        entry = reg.lookup(registry, rn)
+    # Prefer the canonical Asset column; fall back to the legacy RIC Name
+    # shadow (some rows in flight — e.g. straight from the editor before
+    # canonicalize — may only have RIC Name populated).
+    asset = str(row.get("Asset", "") or "").strip() or str(row.get("RIC Name", "") or "").strip()
+    if registry is not None and not (hasattr(registry, "empty") and registry.empty) and asset:
+        entry = reg.lookup(registry, asset)
         if entry is not None:
             return entry.asset_class == "Rate"
     ac = str(row.get("AssetClass", "") or "").strip().lower()
@@ -952,10 +955,21 @@ with tabs[4]:
                 options=universe_strats,
                 required=False,
             ),
+            "Asset": st.column_config.SelectboxColumn(
+                "Asset",
+                help=(
+                    "Canonical asset identifier (== Asset Registry "
+                    "InternalName). Must match a column in the loaded "
+                    "price / rate frames — unmatched assets contribute "
+                    "zero silently."
+                ),
+                options=ric_name_options,
+                required=False,
+            ),
             "RIC": st.column_config.TextColumn("RIC"),
             "RIC Name": st.column_config.SelectboxColumn(
                 "RIC Name",
-                help="Must match a column in the price / rate files for the row to contribute returns. Unmatched rows contribute zero silently.",
+                help="Legacy mirror of Asset — kept for backward compatibility with the portfolio engine. Editing here is equivalent to editing Asset.",
                 options=ric_name_options,
                 required=False,
             ),
@@ -1305,25 +1319,25 @@ with tabs[4]:
                 key="add_size",
             )
 
-            rn_col1, rn_col2, ric_col = st.columns(3)
-            ric_name_pick = rn_col1.selectbox(
-                "RIC Name (market-data column)",
+            rn_col1, rn_col2 = st.columns([2, 1])
+            asset_pick = rn_col1.selectbox(
+                "Asset (canonical, from registry)",
                 options=[""] + ric_name_options,
                 index=0,
-                help="Searchable list of columns present in the price / rate files.",
-                key="add_ric_name_pick",
+                help=(
+                    "Canonical InternalName. Must match a column in the "
+                    "loaded price / rate frames. The Data Manager "
+                    "automatically resolves vendor tickers (Yahoo, "
+                    "Reuters, Bloomberg, FactSet) to the InternalName "
+                    "at ingestion time, so books never store vendor IDs."
+                ),
+                key="add_asset_pick",
             )
-            ric_name_custom = rn_col2.text_input(
-                "RIC Name (custom, optional)",
+            asset_custom = rn_col2.text_input(
+                "Asset (custom, optional)",
                 value="",
-                help="If filled, overrides the selector. Unmatched names will silently contribute zero until the market data catches up.",
-                key="add_ric_name_custom",
-            )
-            ric_val = ric_col.text_input(
-                "RIC (blotter code)",
-                value="",
-                help="Optional trader-facing ticker; not used by the engine.",
-                key="add_ric",
+                help="If filled, overrides the selector. Use only for assets not yet in the registry.",
+                key="add_asset_custom",
             )
 
             with st.expander("+ Optional details (Entry / Exit / Comment)"):
@@ -1342,12 +1356,12 @@ with tabs[4]:
 
         if submitted:
             resolved_strat = strat_new.strip() or strat_pick.strip()
-            resolved_ric_name = ric_name_custom.strip() or ric_name_pick.strip()
+            resolved_asset = asset_custom.strip() or asset_pick.strip()
             errors: list[str] = []
             if not resolved_strat:
                 errors.append("Strategy is required — pick an existing one or type a new label.")
-            if not resolved_ric_name:
-                errors.append("RIC Name is required.")
+            if not resolved_asset:
+                errors.append("Asset is required.")
             if size_val is None or float(size_val) == 0.0:
                 errors.append("Size must be non-zero.")
 
@@ -1357,30 +1371,28 @@ with tabs[4]:
             else:
                 # Resolve AssetClass from the registry so we know whether
                 # to interpret the UI Size as a percentage (FX / Equity)
-                # or as a duration (Rate). The engine only cares about
-                # canonical Size but AssetClass is also useful metadata
-                # for downstream diagnostics + book comparisons.
+                # or as a duration (Rate).
                 resolved_asset_class = ""
                 try:
                     _reg_for_add = reg.load_registry()
                 except Exception:  # noqa: BLE001
                     _reg_for_add = None
-                if resolved_ric_name and _reg_for_add is not None and not _reg_for_add.empty:
-                    _entry = reg.lookup(_reg_for_add, resolved_ric_name)
+                if resolved_asset and _reg_for_add is not None and not _reg_for_add.empty:
+                    _entry = reg.lookup(_reg_for_add, resolved_asset)
                     if _entry is not None:
                         resolved_asset_class = _entry.asset_class
 
-                # Convert the UI Size to canonical: 1.5 → 0.015 for
-                # FX/Equity/blank rows; rate rows pass through
-                # unchanged (0.20 → 0.20).
                 canonical_size = _canonical_size_from_ui(float(size_val), resolved_asset_class)
 
                 new_row = pd.DataFrame([{
                     "BookName": "Scenario",
                     "Strategy": resolved_strat,
                     "AssetClass": resolved_asset_class,
-                    "RIC": ric_val.strip(),
-                    "RIC Name": resolved_ric_name,
+                    # Asset is the canonical identifier; RIC / RIC Name
+                    # are mirrors kept in sync by _canon_scenario.
+                    "Asset": resolved_asset,
+                    "RIC": resolved_asset,
+                    "RIC Name": resolved_asset,
                     "Size": canonical_size,
                     "EntryDate": pd.Timestamp(entry_date_val) if entry_date_val else pd.NaT,
                     "ExitDate": pd.Timestamp(exit_date_val) if exit_date_val else pd.NaT,
@@ -1393,21 +1405,18 @@ with tabs[4]:
                     ignore_index=True, sort=False,
                 )
                 st.session_state.scenario_book = _canon_scenario(combined)
-                # Register the label explicitly — the registry rebuild
-                # at the end of the script run will also pick it up from
-                # scenario_book, but writing it here makes the intent
-                # ("this label now exists in the universe") clear even
-                # if a future refactor moves the rebuild point.
                 st.session_state.strategy_registry.add(resolved_strat)
                 _reset_scenario_editor_state()
-                if resolved_ric_name not in asset_returns.columns:
+                if resolved_asset not in asset_returns.columns:
                     st.warning(
-                        f"`RIC Name = {resolved_ric_name}` is not a column in the "
-                        "price / rate files — this row will silently contribute "
-                        "zero to Performance and Risk until market data matches."
+                        f"`Asset = {resolved_asset}` is not a column in the "
+                        "loaded price / rate files — this row will silently "
+                        "contribute zero to Performance and Risk until market "
+                        "data catches up. Data Manager auto-resolves vendor "
+                        "tickers (Yahoo / Reuters / Bloomberg) on upload."
                     )
                 else:
-                    st.toast(f"Added {resolved_strat} / {resolved_ric_name} ({size_val:+.4f}).")
+                    st.toast(f"Added {resolved_strat} / {resolved_asset} ({size_val:+.4f}).")
                 st.rerun()
 
         # ---- Transforms -----------------------------------------------
