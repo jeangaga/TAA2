@@ -1,14 +1,14 @@
-BookName,Strategy,AssetClass,RIC,RIC Name,Size,EntryDate,EntryLevel,ExitDate,ExitLevel,Comment
-Defensive tilt,long 5y US,Rates,US5YT=RR,UST 5Y,0.20,2026-01-01,,,,Larger duration add
-Defensive tilt,US steepener 5y30y,Rates,US5y30y,UST 5Y,0.10,2026-01-01,,,,Smaller steepener leg
-Defensive tilt,US steepener 5y30y,Rates,US5y30y,UST 30Y,-0.10,2026-01-01,,,,Smaller steepener leg
-Defensive tilt,MIDCAP,Equity,SP400,SP400,0.010,2026-01-01,,,,Reduced mid-cap
-Risk-on tilt,long SPX,Equity,SPX,SPX,0.030,2026-01-01,,,,Double equity
-Risk-on tilt,MIDCAP,Equity,SP400,SP400,0.030,2026-01-01,,,,Double mid-cap
-Risk-on tilt,long 5y US,Rates,US5YT=RR,UST 5Y,0.05,2026-01-01,,,,Reduced duration
-Q1 2026 snapshot,long SPX,Equity,SPX,SPX,0.015,2026-01-01,,2026-04-01,,Book as of start of Q1
-Q1 2026 snapshot,long 5y US,Rates,US5YT=RR,UST 5Y,0.15,2026-01-01,,2026-04-01,,Book as of start of Q1
-LiveFX,EURJPY,FX,EURJPY,EUR/JPY,0.0200,2026-09-04,181.75,,,
-LiveFX,USDJPY,FX,JPY,USD/JPY,0.0150,2026-09-04,155.80,,,
-LiveFX,EURSEK,FX,EURSEK,EUR/SEK,-0.0200,2026-08-25,11.05,,,
-LiveFX,EURUSD,FX,EUR,EUR/USD,-0.0200,2026-08-25,1.1657,2026-08-31,1.1580,
+BookName,Strategy,Asset,Size,EntryDate,EntryLevel,ExitDate,ExitLevel,Comment
+Defensive tilt,long 5y US,UST 5Y,0.20,2026-01-01,,,,Larger duration add
+Defensive tilt,US steepener 5y30y,UST 5Y,0.10,2026-01-01,,,,Smaller steepener 5Y leg
+Defensive tilt,US steepener 5y30y,UST 30Y,-0.10,2026-01-01,,,,Smaller steepener 30Y leg
+Defensive tilt,MIDCAP,SP400,0.010,2026-01-01,,,,Reduced mid-cap
+Risk-on tilt,long SPX,SPX,0.030,2026-01-01,,,,Double equity
+Risk-on tilt,MIDCAP,SP400,0.030,2026-01-01,,,,Double mid-cap
+Risk-on tilt,long 5y US,UST 5Y,0.05,2026-01-01,,,,Reduced duration
+Q1 2026 snapshot,long SPX,SPX,0.015,2026-01-01,,2026-04-01,,Book as of start of Q1
+Q1 2026 snapshot,long 5y US,UST 5Y,0.15,2026-01-01,,2026-04-01,,Book as of start of Q1
+LiveFX,EURJPY,EURJPY,0.0200,2026-09-04,181.75,,,
+LiveFX,USDJPY,JPY,0.0150,2026-09-04,155.80,,,
+LiveFX,EURSEK,EURSEK,-0.0200,2026-08-25,11.05,,,
+LiveFX,EURUSD,EUR,-0.0200,2026-08-25,1.1657,2026-08-31,1.1580,
