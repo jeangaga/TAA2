@@ -326,6 +326,29 @@ def _github_fragment() -> None:
             st.caption(f"✓ {DATA_LABELS[k]}: {m.get('rows', '?')} rows")
 
 
+def _detect_upload_kind(df: pd.DataFrame) -> str | None:
+    """Recognise the upload's schema from its column set.
+
+    * ``"books"``  — has ``BookName`` + ``Strategy`` + ``Size`` (and
+      either ``Asset`` or the legacy ``RIC Name``). Book files must
+      NEVER be routed through the market-data resolver — their
+      columns are structural, not vendor identifiers.
+    * ``"trades"`` — has the trade-blotter required set without a
+      ``BookName`` column.
+    * ``None`` — no strong signal; treat as market data (Prices /
+      Rates) and honour the user's kind picker.
+    """
+    cols = {str(c).strip() for c in df.columns}
+    if {"BookName", "Strategy", "Size"}.issubset(cols) and (
+        "Asset" in cols or "RIC Name" in cols
+    ):
+        return "books"
+    trade_required = {"Strategy", "RIC", "RIC Name", "Size", "EntryDate"}
+    if trade_required.issubset(cols) and "BookName" not in cols:
+        return "trades"
+    return None
+
+
 @_fragment
 def _upload_fragment() -> None:
     kind_label = st.radio(
@@ -357,24 +380,37 @@ def _upload_fragment() -> None:
     dec_col.metric("Decimal", meta["decimal"])
     r_col.metric("Rows detected", meta["rows"])
 
-    # For market-data files (Prices / Rates) auto-resolve raw column
-    # names to canonical InternalNames via the Asset Registry — no
-    # vendor prompt. Trades / Books files use their own column
-    # convention and are not renamed here.
+    # Auto-detect Books / Trades schemas from the columns themselves,
+    # regardless of what the user picked. A Books.csv with columns
+    # BookName / Strategy / Asset / Size / … must NEVER go through the
+    # market-data resolver.
+    detected_kind = _detect_upload_kind(df)
+    if detected_kind and detected_kind != kind_key:
+        st.info(
+            f"Auto-detected **{DATA_LABELS[detected_kind]}** schema in the "
+            f"uploaded file — overriding the '{kind_label}' selection. "
+            f"The confirm button below writes to the {DATA_LABELS[detected_kind]} slot."
+        )
+        kind_key = detected_kind
+        kind_label = DATA_LABELS[detected_kind]
+
+    is_market_kind = kind_key in ("eq", "rates")
+
+    # Column resolver runs ONLY for market-data files. Book /
+    # trade-blotter columns are structural (BookName, Strategy,
+    # Asset, Size, …) and would just fill an unresolved-column table
+    # with false positives.
     resolution_report: list[dict] = []
     unresolved: list[str] = []
-    if kind_key in ("eq", "rates"):
+    if is_market_kind:
         try:
             registry = reg.load_registry()
             id_map = reg.build_identifier_map(registry)
             df, sources, unresolved = reg.normalize_columns(df, id_map)
-            # Build a compact resolution report for the preview.
             for raw, src in sources.items():
                 if src == "internal":
                     resolution_report.append({"Raw column": raw, "Resolved to": raw, "Source": "internal"})
                 else:
-                    # Find the InternalName after rename; the mapping
-                    # dict is in ``id_map`` (raw -> (internal, src)).
                     resolution_report.append({
                         "Raw column": raw,
                         "Resolved to": id_map[raw][0],
@@ -387,10 +423,10 @@ def _upload_fragment() -> None:
             st.warning(f"Column auto-resolver skipped: {e}")
 
     st.caption(
-        f"Columns after resolve: {', '.join(map(str, df.columns[:12]))}"
+        f"Columns: {', '.join(map(str, df.columns[:12]))}"
         + (" …" if len(df.columns) > 12 else "")
     )
-    if resolution_report:
+    if is_market_kind and resolution_report:
         st.markdown("**Column resolution**")
         st.dataframe(
             pd.DataFrame(resolution_report),
@@ -403,24 +439,61 @@ def _upload_fragment() -> None:
                 "`KNOWN_VENDOR_IDS` overlay in `core/asset_registry.py`) "
                 "if you want them recognised."
             )
+
+    # For book uploads, validate Asset against the registry — a book
+    # can reference assets whose market data isn't loaded yet (that's
+    # fine; Performance / Risk report missing market data at working-
+    # book time). We only flag Assets that don't exist in the registry
+    # at all, since those can never resolve.
+    unknown_assets: list[str] = []
+    if kind_key == "books":
+        try:
+            registry = reg.load_registry()
+            known = set(registry["InternalName"].astype(str))
+            asset_col = "Asset" if "Asset" in df.columns else "RIC Name"
+            if asset_col in df.columns:
+                unknown_assets = sorted({
+                    str(a).strip() for a in df[asset_col]
+                    if str(a).strip() and str(a).strip() not in known
+                })
+        except Exception:  # noqa: BLE001
+            pass
+        if unknown_assets:
+            st.warning(
+                "These Assets referenced by the book are NOT in the "
+                f"Asset Registry: {', '.join(unknown_assets)}. The book "
+                "still imports — add them to `data/asset_registry.csv` "
+                "so their market data can be loaded."
+            )
+        else:
+            st.success(
+                "All Assets referenced by this book exist in the registry. "
+                "Market data for them may or may not be loaded — that's "
+                "checked separately when the book becomes the Working Book."
+            )
+
     st.dataframe(df.head(10), use_container_width=True)
 
+    # Confirm-button wording matches the destination slot semantics.
+    if kind_key == "books":
+        confirm_label = "Confirm — import Books (update Books Library)"
+    elif kind_key == "trades":
+        confirm_label = "Confirm — replace Trades slot"
+    else:
+        confirm_label = f"Confirm — replace {kind_label} slot"
+
     if st.button(
-        f"Confirm — replace {kind_label} slot",
+        confirm_label,
         type="primary",
         key=f"dm_upload_confirm_{kind_key}",
     ):
         payload = upload_adapter.normalise_to_csv_bytes(df)
-        set_data(
-            kind_key,
-            payload,
-            "upload",
-            {
-                "filename": uploaded.name,
-                "unresolved_columns": unresolved,
-                **_summarise_csv(payload),
-            },
-        )
+        meta_extra = {"filename": uploaded.name, **_summarise_csv(payload)}
+        if is_market_kind and unresolved:
+            meta_extra["unresolved_columns"] = unresolved
+        if kind_key == "books" and unknown_assets:
+            meta_extra["unknown_assets"] = unknown_assets
+        set_data(kind_key, payload, "upload", meta_extra)
         st.success(f"{kind_label} slot replaced from upload · {uploaded.name}")
         _rerun_app()
 
