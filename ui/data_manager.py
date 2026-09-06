@@ -51,6 +51,7 @@ from core import asset_registry as reg
 from core.adapters import github as gh_adapter
 from core.adapters import upload as upload_adapter
 from core.adapters import yahoo as yahoo_adapter
+from ui.tables import render_table
 
 # --------------------------------------------------------------------------
 # Streamlit-version compatibility shims
@@ -428,10 +429,7 @@ def _upload_fragment() -> None:
     )
     if is_market_kind and resolution_report:
         st.markdown("**Column resolution**")
-        st.dataframe(
-            pd.DataFrame(resolution_report),
-            use_container_width=True, hide_index=True,
-        )
+        render_table(pd.DataFrame(resolution_report), hide_index=True)
         if unresolved:
             st.warning(
                 "Unresolved columns kept with their raw names — add a "
@@ -472,7 +470,7 @@ def _upload_fragment() -> None:
                 "checked separately when the book becomes the Working Book."
             )
 
-    st.dataframe(df.head(10), use_container_width=True)
+    render_table(df.head(10))
 
     # Confirm-button wording matches the destination slot semantics.
     if kind_key == "books":

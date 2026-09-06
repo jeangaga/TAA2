@@ -27,6 +27,7 @@ from plotly.subplots import make_subplots
 
 from core import asset_registry as reg
 from core import technical as tech
+from ui.tables import render_table
 
 
 # --------------------------------------------------------------------------
@@ -159,14 +160,14 @@ def render(
         st.info("No price data loaded.")
     else:
         table = _summary_table(eq_prices, is_rate=False)
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        render_table(table)
 
     st.markdown("**Loaded rates (yield levels)**")
     if rates_levels is None or rates_levels.empty:
         st.info("No rate data loaded.")
     else:
         table = _summary_table(rates_levels, is_rate=True)
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        render_table(table)
 
     st.divider()
 

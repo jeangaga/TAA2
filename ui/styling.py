@@ -139,36 +139,57 @@ button[data-testid="baseButton-primary"], button[data-testid="baseButton-seconda
    gives numbers ~15 px, which is what the spec asks for. */
 
 /* ------------------------------------------------------------------
-   st.table — used by ``ui/tables.render_table``. HTML-rendered, so
-   CSS actually applies to the cells (unlike st.dataframe's canvas).
+   st.table — the app's standard read-only table renderer (see
+   ``ui/tables.render_table``). HTML-rendered, so CSS actually
+   applies to the cells (unlike st.dataframe's canvas).
+
+   Width policy: ``width: auto`` + ``table-layout: auto`` lets the
+   browser pick each column's width from its actual content, capped
+   at the container. That gives short numeric columns a compact
+   ~90-120 px while allowing long text columns to breathe, WITHOUT
+   arbitrary per-column pixel widths. Small tables shrink naturally;
+   wide tables use up to the full container.
    ------------------------------------------------------------------ */
+[data-testid="stTable"] {
+    /* Container spans full width; the <table> inside collapses to
+       its natural content width (see the table selector below). */
+    overflow-x: auto !important;
+}
 [data-testid="stTable"] table {
+    width: auto !important;
+    max-width: 100% !important;
+    table-layout: auto !important;
     font-size: 0.94rem !important;   /* ≈ 16 px on the 17 px root */
     border-collapse: collapse !important;
 }
 [data-testid="stTable"] th {
-    font-size: 0.88rem !important;   /* ≈ 15 px */
+    font-size: 0.88rem !important;   /* ≈ 15 px, semibold */
     font-weight: 600 !important;
     text-align: left !important;
     background: #f6f7f8 !important;
-    padding: 8px 12px !important;
+    padding: 8px 14px !important;
+    white-space: nowrap !important;
 }
 [data-testid="stTable"] td {
-    font-size: 0.94rem !important;   /* ≈ 16 px */
+    font-size: 0.94rem !important;   /* ≈ 16 px, medium weight */
     font-weight: 450 !important;
-    padding: 7px 12px !important;
+    padding: 7px 14px !important;
+    white-space: nowrap !important;
 }
-/* Row-label column (first td / th of each row) — a touch stronger so
-   the Strategy / Asset / Factor label reads immediately. */
+/* Row-label column (first cell of each row when the index is
+   materialised as tbody <th>) — bold + no-wrap so labels like
+   `Imported · LiveFX` don't fragment. */
 [data-testid="stTable"] tbody th {
     font-weight: 600 !important;
     color: #222 !important;
     text-align: left !important;
     white-space: nowrap !important;
+    padding: 7px 14px !important;
 }
-/* Numeric cells look better right-aligned. Pandas emits them without
-   a distinguishing class; we right-align every td, then let the
-   left-aligned bold tbody th handle the label. */
+/* Numeric cells look better right-aligned with tabular figures so
+   decimals stack vertically. Pandas emits every non-index cell as
+   <td> without a distinguishing class, so this applies to all
+   data cells. */
 [data-testid="stTable"] tbody td {
     text-align: right !important;
     font-variant-numeric: tabular-nums !important;

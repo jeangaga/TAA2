@@ -1,48 +1,88 @@
-"""Adaptive-width table helper — HTML-rendered for legibility.
+"""One common read-only table renderer for the whole TAA app.
 
-Streamlit's ``st.dataframe`` draws cells on a canvas (via
-glide-data-grid), which ignores CSS ``font-size`` on the container.
-That's why our previous "make the numbers bigger" CSS pass didn't
-visibly bite.
+Key design decisions
+--------------------
+* **Renderer** — ``st.table`` (HTML) rather than ``st.dataframe``
+  (canvas). CSS actually reaches the cells, and the browser's HTML
+  auto-layout gives each column a **content-aware** width, so a
+  Sharpe column takes ~90 px while a Comment column can breathe to
+  ~300 px — no equal-width stretching, no arbitrary global
+  percentage.
 
-For the small read-only stats tables that live in Risk, Performance,
-Book Comparison, etc. we render with ``st.table`` instead. It emits a
-plain ``<table>`` — every cell is real DOM, CSS from ``ui/styling.py``
-does apply, and the pandas index (Strategy / Asset / Factor / …)
-shows as the first column by default.
+* **Semantic index preserved** — anything except the default
+  ``RangeIndex`` is kept visible as the leftmost column. Existing
+  callers that use ``.style.format(...)`` on the underlying frame
+  work unchanged.
 
-Adaptive width is achieved by wrapping the table in an ``st.columns``
-split, leaving whitespace on the right so a 3-column stats table
-doesn't stretch across a very wide screen.
+* **Central percentage format** — a small ``PERCENT_COLUMN_HINTS`` /
+  ``SIGNED_PERCENT_HINTS`` pair drives an auto-formatter (2 decimal
+  places, signed / unsigned per column name) that callers can opt
+  into with ``auto_percent=True`` when they don't have a Styler of
+  their own. Callers that DO pass a Styler keep their own format
+  strings.
+
+* **Left-aligned table** — the container is full width by default;
+  the HTML table inside collapses to its natural width via the
+  ``table { width: auto }`` rule in ``ui/styling.py``, leaving
+  whitespace on the right rather than stretching numeric columns.
+
+* **Precision is display-only** — underlying floats are never mutated;
+  the helper wraps values in a Styler when needed and hands the
+  Styler to Streamlit.
 """
 from __future__ import annotations
+
+from typing import Iterable
 
 import pandas as pd
 import streamlit as st
 
 
-def width_ratio(n_data_cols: int) -> int:
-    """Percentage of the container the table should occupy.
+# --------------------------------------------------------------------------
+# Column-name heuristics for the centralised percentage formatter.
+# --------------------------------------------------------------------------
+# A column whose name contains any of these tokens is treated as a
+# percentage. Case-insensitive substring match on the header.
+PERCENT_COLUMN_HINTS: tuple[str, ...] = (
+    "(%)", "return", "vol", "drawdown", "contribpct", "ytd",
+    "perf", "distance to peak", "worst", "cumulative contribution",
+    "annualised contribution", "standalone vol",
+)
+# Percentage columns that read most naturally with a leading sign
+# (returns, PnL, deltas) rather than unsigned (vol, share).
+SIGNED_PERCENT_HINTS: tuple[str, ...] = (
+    "return", "drawdown", "1d", "1w", "1m", "ytd", "1y",
+    "perf", "delta", "contribution",
+)
 
-    ``n_data_cols`` counts only the DataFrame's columns (the index
-    column that ``st.table`` renders on the left is NOT counted here,
-    since it takes proportionally less space). Thresholds are
-    deliberately loose — the goal is to stop small tables from
-    stretching across a wide screen, not to make them tiny.
+
+def _percent_format_for(col_name: str) -> str:
+    name = str(col_name).lower()
+    signed = any(h in name for h in SIGNED_PERCENT_HINTS)
+    return "{:+.2%}" if signed else "{:.2%}"
+
+
+def is_percent_column(col_name: str) -> bool:
+    name = str(col_name).lower()
+    return any(h in name for h in PERCENT_COLUMN_HINTS)
+
+
+def auto_percent_formats(columns: Iterable[str]) -> dict[str, str]:
+    """Return ``{col: format_string}`` for every column that looks like a
+    percentage. Uses the ``{:.2%}`` / ``{:+.2%}`` percent-of-fraction
+    convention (input ``0.0125`` → ``"1.25%"``).
     """
-    if n_data_cols <= 2:
-        return 70
-    if n_data_cols <= 3:
-        return 78
-    if n_data_cols <= 4:
-        return 85
-    if n_data_cols <= 6:
-        return 90
-    return 100
+    return {
+        c: _percent_format_for(c)
+        for c in columns
+        if is_percent_column(c)
+    }
 
 
+# --------------------------------------------------------------------------
+# Renderer
+# --------------------------------------------------------------------------
 def _underlying(obj):
-    """Return the underlying DataFrame from either a DataFrame or a Styler."""
     if obj is None:
         return None
     if hasattr(obj, "data") and hasattr(obj.data, "columns"):
@@ -51,11 +91,6 @@ def _underlying(obj):
 
 
 def _index_is_meaningful(df: pd.DataFrame | None) -> bool:
-    """True when the index carries semantic row labels the user should see.
-
-    The default 0..N-1 ``RangeIndex`` is not meaningful; every other
-    index (strings, MultiIndex, named RangeIndex, …) is preserved.
-    """
     if df is None:
         return False
     idx = df.index
@@ -70,25 +105,38 @@ def render_table(
     df,
     *,
     hide_index: bool | None = None,
+    auto_percent: bool = False,
+    extra_formats: dict[str, str] | None = None,
+    use_dataframe: bool = False,
     key: str | None = None,
     column_config: dict | None = None,
-    full_width: bool = False,
-    use_dataframe: bool = False,
 ) -> None:
-    """Render a read-only table (DataFrame or Styler) legibly.
+    """Render a read-only table (DataFrame or Styler) with the app's
+    global policy: HTML rendering, content-aware widths, semantic
+    index preserved.
 
-    * Uses ``st.table`` by default so CSS actually reaches the cells
-      (headers ~15 px semibold, body ~15.5 px, numeric right-aligned
-      by pandas convention).
-    * Auto-preserves the pandas index if it carries semantic labels
-      (Strategy / Asset / Factor …). Pass ``hide_index=True`` to
-      suppress even a meaningful index; pass ``hide_index=False`` to
-      always show the default 0..N-1 index too.
-    * Adaptive width via ``width_ratio``; ``full_width=True`` overrides.
-    * ``use_dataframe=True`` opts back into ``st.dataframe`` for wide
-      tables that need scrolling / sorting affordances (Data Quality
-      diagnostics, Books Library grids, etc.). ``column_config`` and
-      ``key`` are forwarded only in that path.
+    Parameters
+    ----------
+    df
+        DataFrame or Styler. Callers that already applied a Styler
+        keep their formatting; the helper does not override it.
+    hide_index
+        ``None`` (default) — auto-detect: keep the index when it's
+        semantic, drop it when it's the default 0..N-1 RangeIndex.
+        ``True`` / ``False`` — explicit override.
+    auto_percent
+        If ``True`` and ``df`` is a raw DataFrame, apply the app's
+        standard 2-decimal percent format to every column whose name
+        matches ``PERCENT_COLUMN_HINTS``. Ignored when ``df`` is
+        already a Styler.
+    extra_formats
+        Optional ``{col: format_string}`` merged on top of the
+        auto-percent map.
+    use_dataframe
+        ``True`` opts back into ``st.dataframe`` for wide grids that
+        need interactivity (Books Library remove-picker, Data Quality
+        diagnostic table). ``column_config`` and ``key`` are forwarded
+        only in that path.
     """
     if df is None:
         return
@@ -96,54 +144,35 @@ def render_table(
     if inner is None:
         return
 
-    n_data_cols = len(inner.columns)
-    ratio = 100 if (full_width or inner.empty) else width_ratio(n_data_cols)
+    # Apply centralised percent formatting when the caller didn't
+    # bring their own Styler.
+    if auto_percent and not hasattr(df, "data"):
+        fmts = auto_percent_formats(df.columns)
+        if extra_formats:
+            fmts.update(extra_formats)
+        if fmts:
+            df = df.style.format(fmts, na_rep="—")
 
-    def _draw(target):
-        if use_dataframe:
-            # st.dataframe path — hide_index defaults to True (dataframe
-            # renders 0..N-1 by default and the caller has usually
-            # already reset_index if they wanted labels shown).
-            effective_hide = True if hide_index is None else hide_index
-            target.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=effective_hide,
-                column_config=column_config,
-                key=key,
-            )
-        else:
-            # st.table path — HTML-rendered, CSS actually applies.
-            # ``hide_index`` is not natively supported; if the caller
-            # wants to hide a meaningful index, materialise a
-            # ``reset_index`` copy first. For None (auto), show the
-            # index when it's semantic and hide the default RangeIndex
-            # by explicitly resetting it (which yields the default
-            # RangeIndex → st.table hides nothing but the numeric
-            # index adds no clutter for the small tables we render).
-            payload = df
-            if hide_index is True:
-                # Drop the index by resetting-then-dropping the new
-                # column.
-                if hasattr(df, "data"):
-                    # Styler — rebuild without the index column
-                    _tmp = df.data.reset_index(drop=True)
-                    payload = _tmp.style.format(df._display_funcs) if hasattr(df, "_display_funcs") else _tmp
-                else:
-                    payload = df.reset_index(drop=True)
-            elif hide_index is None and not _index_is_meaningful(inner):
-                # Default numeric RangeIndex — drop it so we don't
-                # render 0/1/2/3 as row labels.
-                if hasattr(df, "data"):
-                    payload = df  # Styler will still render its default index; acceptable
-                else:
-                    payload = df.reset_index(drop=True)
-            target.table(payload)
-
-    if ratio >= 100:
-        _draw(st)
+    if use_dataframe:
+        effective_hide = True if hide_index is None else hide_index
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=effective_hide,
+            column_config=column_config,
+            key=key,
+        )
         return
 
-    left, _right = st.columns([ratio, max(1, 100 - ratio)])
-    with left:
-        _draw(left)
+    # st.table path — HTML, CSS applies, content-aware widths.
+    if hide_index is True:
+        if hasattr(df, "data"):
+            df = df.data.reset_index(drop=True)
+        else:
+            df = df.reset_index(drop=True)
+    elif hide_index is None and not _index_is_meaningful(inner) and not hasattr(df, "data"):
+        # Drop the default numeric RangeIndex so it doesn't render
+        # 0/1/2/3 as row labels.
+        df = df.reset_index(drop=True)
+
+    st.table(df)
