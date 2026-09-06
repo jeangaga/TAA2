@@ -138,11 +138,40 @@ button[data-testid="baseButton-primary"], button[data-testid="baseButton-seconda
    font-tune them per-column; the global cell bump above already
    gives numbers ~15 px, which is what the spec asks for. */
 
-[data-testid="stTable"] table, [data-testid="stTable"] table * {
-    font-size: 0.92rem !important;
+/* ------------------------------------------------------------------
+   st.table — used by ``ui/tables.render_table``. HTML-rendered, so
+   CSS actually applies to the cells (unlike st.dataframe's canvas).
+   ------------------------------------------------------------------ */
+[data-testid="stTable"] table {
+    font-size: 0.94rem !important;   /* ≈ 16 px on the 17 px root */
+    border-collapse: collapse !important;
 }
-[data-testid="stTable"] td, [data-testid="stTable"] th {
-    padding: 6px 10px !important;
+[data-testid="stTable"] th {
+    font-size: 0.88rem !important;   /* ≈ 15 px */
+    font-weight: 600 !important;
+    text-align: left !important;
+    background: #f6f7f8 !important;
+    padding: 8px 12px !important;
+}
+[data-testid="stTable"] td {
+    font-size: 0.94rem !important;   /* ≈ 16 px */
+    font-weight: 450 !important;
+    padding: 7px 12px !important;
+}
+/* Row-label column (first td / th of each row) — a touch stronger so
+   the Strategy / Asset / Factor label reads immediately. */
+[data-testid="stTable"] tbody th {
+    font-weight: 600 !important;
+    color: #222 !important;
+    text-align: left !important;
+    white-space: nowrap !important;
+}
+/* Numeric cells look better right-aligned. Pandas emits them without
+   a distinguishing class; we right-align every td, then let the
+   left-aligned bold tbody th handle the label. */
+[data-testid="stTable"] tbody td {
+    text-align: right !important;
+    font-variant-numeric: tabular-nums !important;
 }
 
 /* ==================================================================

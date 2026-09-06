@@ -1,19 +1,19 @@
-"""Adaptive-width table helper.
+"""Adaptive-width table helper — HTML-rendered for legibility.
 
-Small read-only tables (Risk statistics, Contribution to TAA risk,
-Beta exposure, book-level summaries) previously stretched across the
-full page even when they only had 3-5 columns. This helper picks a
-sensible width from the column count and renders the table
-left-aligned inside a narrower column, leaving whitespace on the
-right rather than blowing every cell out to a quarter of the screen.
+Streamlit's ``st.dataframe`` draws cells on a canvas (via
+glide-data-grid), which ignores CSS ``font-size`` on the container.
+That's why our previous "make the numbers bigger" CSS pass didn't
+visibly bite.
 
-Editable grids (``st.data_editor``) still want maximum working room,
-so they use their own call sites — this module is intended only for
-read-only ``st.dataframe`` renders.
+For the small read-only stats tables that live in Risk, Performance,
+Book Comparison, etc. we render with ``st.table`` instead. It emits a
+plain ``<table>`` — every cell is real DOM, CSS from ``ui/styling.py``
+does apply, and the pandas index (Strategy / Asset / Factor / …)
+shows as the first column by default.
 
-Font styling (bigger body cells, semibold headers, slightly taller
-rows) is applied globally by ``ui/styling.py``; nothing here touches
-CSS.
+Adaptive width is achieved by wrapping the table in an ``st.columns``
+split, leaving whitespace on the right so a 3-column stats table
+doesn't stretch across a very wide screen.
 """
 from __future__ import annotations
 
@@ -21,83 +21,129 @@ import pandas as pd
 import streamlit as st
 
 
-def width_ratio(n_cols: int) -> int:
+def width_ratio(n_data_cols: int) -> int:
     """Percentage of the container the table should occupy.
 
-    Matches the spec:
-        1-3 cols   → ~60 %  (compact block, lots of trailing whitespace)
-        4-5 cols   → ~72 %
-        6-7 cols   → ~85 %
-        8+ cols    → full width
+    ``n_data_cols`` counts only the DataFrame's columns (the index
+    column that ``st.table`` renders on the left is NOT counted here,
+    since it takes proportionally less space). Thresholds are
+    deliberately loose — the goal is to stop small tables from
+    stretching across a wide screen, not to make them tiny.
     """
-    if n_cols <= 3:
-        return 60
-    if n_cols <= 5:
-        return 72
-    if n_cols <= 7:
+    if n_data_cols <= 2:
+        return 70
+    if n_data_cols <= 3:
+        return 78
+    if n_data_cols <= 4:
         return 85
+    if n_data_cols <= 6:
+        return 90
     return 100
 
 
-def _column_count(obj) -> int:
-    """Column count for either a DataFrame or a Styler."""
+def _underlying(obj):
+    """Return the underlying DataFrame from either a DataFrame or a Styler."""
     if obj is None:
-        return 0
-    # Styler wraps a DataFrame in ``.data``.
+        return None
     if hasattr(obj, "data") and hasattr(obj.data, "columns"):
-        return len(obj.data.columns)
-    if hasattr(obj, "columns"):
-        return len(obj.columns)
-    return 0
+        return obj.data
+    return obj
 
 
-def _is_empty(obj) -> bool:
-    if obj is None:
-        return True
-    if hasattr(obj, "data"):
-        return getattr(obj.data, "empty", False)
-    return getattr(obj, "empty", False)
+def _index_is_meaningful(df: pd.DataFrame | None) -> bool:
+    """True when the index carries semantic row labels the user should see.
+
+    The default 0..N-1 ``RangeIndex`` is not meaningful; every other
+    index (strings, MultiIndex, named RangeIndex, …) is preserved.
+    """
+    if df is None:
+        return False
+    idx = df.index
+    if idx is None:
+        return False
+    if isinstance(idx, pd.RangeIndex) and idx.name is None:
+        return False
+    return True
 
 
 def render_table(
     df,
     *,
-    hide_index: bool = True,
+    hide_index: bool | None = None,
     key: str | None = None,
     column_config: dict | None = None,
     full_width: bool = False,
+    use_dataframe: bool = False,
 ) -> None:
-    """Render a read-only table (DataFrame or Styler) with adaptive width.
+    """Render a read-only table (DataFrame or Styler) legibly.
 
-    Set ``full_width=True`` to force full container width regardless
-    of column count — used for tables where the width is intentional
-    (e.g. the wide diagnostics grid in Data Quality).
+    * Uses ``st.table`` by default so CSS actually reaches the cells
+      (headers ~15 px semibold, body ~15.5 px, numeric right-aligned
+      by pandas convention).
+    * Auto-preserves the pandas index if it carries semantic labels
+      (Strategy / Asset / Factor …). Pass ``hide_index=True`` to
+      suppress even a meaningful index; pass ``hide_index=False`` to
+      always show the default 0..N-1 index too.
+    * Adaptive width via ``width_ratio``; ``full_width=True`` overrides.
+    * ``use_dataframe=True`` opts back into ``st.dataframe`` for wide
+      tables that need scrolling / sorting affordances (Data Quality
+      diagnostics, Books Library grids, etc.). ``column_config`` and
+      ``key`` are forwarded only in that path.
     """
     if df is None:
         return
-    n_cols = _column_count(df)
-    ratio = 100 if (full_width or _is_empty(df)) else width_ratio(n_cols)
-
-    if ratio >= 100:
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=hide_index,
-            column_config=column_config,
-            key=key,
-        )
+    inner = _underlying(df)
+    if inner is None:
         return
 
-    # Two-column split — table on the left, whitespace on the right.
-    # `st.columns` with numeric weights gives the same behaviour as a
-    # CSS max-width without any per-tab CSS hackery, and it stays
-    # aligned with the section header above.
+    n_data_cols = len(inner.columns)
+    ratio = 100 if (full_width or inner.empty) else width_ratio(n_data_cols)
+
+    def _draw(target):
+        if use_dataframe:
+            # st.dataframe path — hide_index defaults to True (dataframe
+            # renders 0..N-1 by default and the caller has usually
+            # already reset_index if they wanted labels shown).
+            effective_hide = True if hide_index is None else hide_index
+            target.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=effective_hide,
+                column_config=column_config,
+                key=key,
+            )
+        else:
+            # st.table path — HTML-rendered, CSS actually applies.
+            # ``hide_index`` is not natively supported; if the caller
+            # wants to hide a meaningful index, materialise a
+            # ``reset_index`` copy first. For None (auto), show the
+            # index when it's semantic and hide the default RangeIndex
+            # by explicitly resetting it (which yields the default
+            # RangeIndex → st.table hides nothing but the numeric
+            # index adds no clutter for the small tables we render).
+            payload = df
+            if hide_index is True:
+                # Drop the index by resetting-then-dropping the new
+                # column.
+                if hasattr(df, "data"):
+                    # Styler — rebuild without the index column
+                    _tmp = df.data.reset_index(drop=True)
+                    payload = _tmp.style.format(df._display_funcs) if hasattr(df, "_display_funcs") else _tmp
+                else:
+                    payload = df.reset_index(drop=True)
+            elif hide_index is None and not _index_is_meaningful(inner):
+                # Default numeric RangeIndex — drop it so we don't
+                # render 0/1/2/3 as row labels.
+                if hasattr(df, "data"):
+                    payload = df  # Styler will still render its default index; acceptable
+                else:
+                    payload = df.reset_index(drop=True)
+            target.table(payload)
+
+    if ratio >= 100:
+        _draw(st)
+        return
+
     left, _right = st.columns([ratio, max(1, 100 - ratio)])
     with left:
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=hide_index,
-            column_config=column_config,
-            key=key,
-        )
+        _draw(left)
