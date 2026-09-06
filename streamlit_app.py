@@ -277,12 +277,27 @@ def _refresh_library(
     current_book: pd.DataFrame,
     *,
     demo_active: bool = False,
+    as_of_date=None,
 ) -> Dict[str, pd.DataFrame]:
     """Recompose the library dict from session state.
 
-    When ``demo_active`` is True (no real Trades loaded) the ``Current``
-    slot is replaced by an in-memory Demo Book built from the asset
-    registry. Real trades → real ``Current``; the two paths never mix.
+    Imported / generated / snapshot books can legitimately carry
+    historical trade metadata (past ``ExitDate`` values, future
+    ``EntryDate`` values) for audit purposes. When any such book is
+    exposed to the working-book / Performance / Risk layer it must
+    represent **today's OPEN positions** — nothing else. The
+    canonical filter is :func:`books.filter_open_positions`, applied
+    here at the library boundary; ``st.session_state.imported_books``
+    (etc.) still holds the raw history untouched.
+
+    ``Current`` is already the open-positions view (Trades.csv →
+    ``open_as_of_date``) so it is passed through unfiltered.
+
+    ``Scenario (editable)`` is the user's in-progress WIP — it is
+    NOT filtered here: rows the user has deliberately kept (even
+    ones with lifecycle dates) stay in the editor. Consumers that
+    materialise scenario positions for engine input still call
+    :func:`books.book_to_trades_frame`.
     """
     lib: Dict[str, pd.DataFrame] = {}
     if demo_active:
@@ -297,12 +312,20 @@ def _refresh_library(
         lib["Current"] = current_book
     if st.session_state.scenario_book is not None and len(st.session_state.scenario_book) > 0:
         lib["Scenario (editable)"] = st.session_state.scenario_book
+
+    def _active(book):
+        return (
+            books.filter_open_positions(book, as_of_date)
+            if as_of_date is not None
+            else book
+        )
+
     for name, b in st.session_state.imported_books.items():
-        lib[f"Imported · {name}"] = b
+        lib[f"Imported · {name}"] = _active(b)
     for name, b in st.session_state.generated_books.items():
-        lib[f"Generated · {name}"] = b
+        lib[f"Generated · {name}"] = _active(b)
     for name, b in st.session_state.snapshots.items():
-        lib[f"Snapshot · {name}"] = b
+        lib[f"Snapshot · {name}"] = _active(b)
     st.session_state.library = lib
     return lib
 
@@ -456,7 +479,7 @@ trades_open = trades.open_as_of_date(trades_clean, as_of_ts)
 # Live book — official `Current` book derived from open trades
 # --------------------------------------------------------------------------
 current_book = books.trades_to_live_book(trades_open, book_name="Current")
-library = _refresh_library(current_book, demo_active=demo_active)
+library = _refresh_library(current_book, demo_active=demo_active, as_of_date=as_of_ts.date())
 _default_working_book = books.DEMO_BOOK_NAME if demo_active else "Current"
 # Strategy registry tracks every label we've ever seen in any book in
 # this session. It is the universe the scenario's Add Position form and
@@ -1620,7 +1643,7 @@ with tabs[4]:
 # Re-refresh library + strategy registry after potential scenario
 # edits / snapshots / Add Position / Apply scope. The registry is
 # monotonic per session — pruned labels stay pickable.
-library = _refresh_library(current_book, demo_active=demo_active)
+library = _refresh_library(current_book, demo_active=demo_active, as_of_date=as_of_ts.date())
 strategy_registry_sorted = _refresh_strategy_registry(library)
 
 
