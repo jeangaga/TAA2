@@ -197,6 +197,50 @@ def trades_to_live_book(
 
 
 # ---------------------------------------------------------------------------
+# Central open-position filter — the single source of truth for "which
+# rows are OPEN as of `as_of_date`". Used everywhere a source book has
+# to become an active book (Working Book, Scenario seed, Performance /
+# Risk input).
+# ---------------------------------------------------------------------------
+def filter_open_positions(book: pd.DataFrame, as_of_date) -> pd.DataFrame:
+    """Return only the rows OPEN as of ``as_of_date``.
+
+    A row is OPEN when:
+
+    * ``EntryDate`` is missing OR ``EntryDate <= as_of_date``; AND
+    * ``ExitDate`` is missing OR ``ExitDate >= as_of_date``.
+
+    Convention: ``ExitDate == as_of_date`` remains INCLUDED (the
+    position closes end-of-day and still contributes today).
+    Excluded rows are those with ``EntryDate > today`` (not yet
+    entered) or ``ExitDate < today`` (already closed).
+
+    Rows with completely blank date metadata — Market-Universe
+    template slots, snapshot rows that never carried a lifecycle —
+    are always kept. This filter targets books that intentionally
+    carry lifecycle dates (imported Books.csv rows, LiveFX-style
+    trade blotters).
+
+    The filter is PURE: engine math, canonical Size and every other
+    downstream mechanic is untouched. Its only job is to answer the
+    question "which of these positions are open today" before the
+    resulting frame goes into the constant-exposure Performance /
+    Risk engine.
+    """
+    if book is None or len(book) == 0:
+        return book if book is not None else pd.DataFrame()
+    as_of = pd.Timestamp(as_of_date).normalize()
+    df = book.copy()
+    entry = pd.to_datetime(df.get("EntryDate"), errors="coerce")
+    exit_ = pd.to_datetime(df.get("ExitDate"), errors="coerce")
+    mask = (
+        (entry.isna() | (entry.dt.normalize() <= as_of))
+        & (exit_.isna() | (exit_.dt.normalize() >= as_of))
+    )
+    return df.loc[mask].reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # Books.csv loader
 # ---------------------------------------------------------------------------
 def load_books_csv(file_bytes: bytes) -> Dict[str, pd.DataFrame]:
