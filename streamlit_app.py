@@ -77,6 +77,7 @@ from core.config import (
 from ui import data_manager as dm
 from ui import market_tab
 from ui import styling
+from ui.tables import render_table
 from utils import plotting
 
 # --------------------------------------------------------------------------
@@ -2154,14 +2155,13 @@ with tabs[5]:
                     if anchor_stats.empty:
                         st.info("No data since the selected start date.")
                     else:
-                        st.dataframe(
+                        render_table(
                             anchor_stats.style.format({
                                 "Return since start": "{:+.2%}",
                                 "Ann.Vol since start": "{:.2%}",
                                 "Max DD since start": "{:.2%}",
                                 "Current DD since start": "{:.2%}",
                             }, na_rep="—"),
-                            use_container_width=True,
                         )
 
                     horizon_tbl = performance.horizon_returns(
@@ -2177,9 +2177,8 @@ with tabs[5]:
                             "computed from the chosen analysis-window "
                             "start date."
                         )
-                        st.dataframe(
+                        render_table(
                             horizon_tbl.style.format("{:+.2%}", na_rep="—"),
-                            use_container_width=True,
                         )
 
                 # 3. Construction diagnostics
@@ -2195,7 +2194,7 @@ with tabs[5]:
                     if cd.empty:
                         st.info("Not enough data to compute construction diagnostics.")
                     else:
-                        st.dataframe(
+                        render_table(
                             cd.style.format({
                                 "Cumulative contribution": "{:+.2%}",
                                 "Annualised contribution": "{:+.2%}",
@@ -2203,7 +2202,6 @@ with tabs[5]:
                                 "Max drawdown": "{:.2%}",
                                 "Worst 20d loss": "{:+.2%}",
                             }, na_rep="—"),
-                            use_container_width=True,
                         )
 
                 # 4. Tactical momentum / stretch diagnostics
@@ -2223,7 +2221,7 @@ with tabs[5]:
                     if tact.empty:
                         st.info("Not enough data for tactical diagnostics.")
                     else:
-                        st.dataframe(
+                        render_table(
                             tact.style.format({
                                 "RSI(14)": "{:.1f}",
                                 "20d return": "{:+.2%}",
@@ -2232,7 +2230,6 @@ with tabs[5]:
                                 "Distance to peak": "{:+.2%}",
                                 "Days since peak": "{:.0f}",
                             }, na_rep="—"),
-                            use_container_width=True,
                         )
 
 
@@ -2251,14 +2248,13 @@ with tabs[6]:
         st.warning("No strategy returns available for this book.")
     else:
         stats = risk.compute_risk_stats(strategy_returns)
-        st.dataframe(
+        render_table(
             stats.style.format({
                 "Ann.Return": "{:+.2%}",
                 "Ann.Vol": "{:.2%}",
                 "Sharpe": "{:.2f}",
                 "Max.Drawdown": "{:.2%}",
             }, na_rep=""),
-            use_container_width=True,
         )
 
         st.subheader("Approximate contribution to TAA risk")
@@ -2266,12 +2262,11 @@ with tabs[6]:
         if rc.empty:
             st.info("Not enough data to decompose TAA volatility.")
         else:
-            st.dataframe(
+            render_table(
                 rc.style.format({
                     "MarginalContribution": "{:.4f}",
                     "ContribPct": "{:.2f}%",
                 }, na_rep=""),
-                use_container_width=True,
             )
 
         # ------------------------------------------------------------------
@@ -2319,9 +2314,8 @@ with tabs[6]:
                 )
             else:
                 exp_fmt = {c: "{:+.4f}" for c in factor_exposure.columns}
-                st.dataframe(
+                render_table(
                     factor_exposure.style.format(exp_fmt, na_rep=""),
-                    use_container_width=True,
                 )
                 with st.expander("Raw asset-vs-factor regression betas"):
                     st.caption(
@@ -2330,9 +2324,8 @@ with tabs[6]:
                         "above. Cells are NaN when a regression had fewer "
                         "than 20 overlapping non-NaN observations."
                     )
-                    st.dataframe(
+                    render_table(
                         asset_betas.style.format("{:+.3f}", na_rep=""),
-                        use_container_width=True,
                     )
 
         # ---- B. Rolling volatility ----
@@ -2673,12 +2666,11 @@ with tabs[7]:
         for _c in ("Gross", "Net", "Vol", "AnnVol"):
             if _c in kpi.columns:
                 kpi[_c] = pd.to_numeric(kpi[_c], errors="coerce")
-        st.dataframe(
+        render_table(
             kpi.style.format({
                 "Gross": "{:+.4f}", "Net": "{:+.4f}",
                 "Vol": "{:.4%}", "AnnVol": "{:.2%}",
             }, na_rep=""),
-            use_container_width=True,
         )
 
         # ---- Strategy level ----
