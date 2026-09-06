@@ -115,14 +115,35 @@ button[data-testid="baseButton-primary"], button[data-testid="baseButton-seconda
 }
 
 /* ==================================================================
-   DATAFRAME / DATA-EDITOR
+   DATAFRAME / DATA-EDITOR — global readability bump
+   ------------------------------------------------------------------
+   Cell font sizes are set relative to the 17 px root, so both
+   read-only tables and the editable grid get the same larger,
+   easier-to-scan text without altering table contents / calculations
+   / column widths. Row height is nudged up (~30–34 px effective)
+   via a tighter line-height + a hair more vertical padding — dense
+   enough to remain institutional, not spreadsheet-airy.
    ================================================================== */
 [data-testid="stDataFrame"], [data-testid="stDataFrame"] *,
 [data-testid="stDataEditor"], [data-testid="stDataEditor"] * {
-    font-size: 0.88rem !important;
+    font-size: 0.92rem !important;  /* ≈ 15.5 px on a 17 px root */
+    line-height: 1.55 !important;
 }
-[data-testid="stDataFrame"] th, [data-testid="stDataEditor"] th { font-weight: 600 !important; }
-[data-testid="stTable"] table, [data-testid="stTable"] table * { font-size: 0.88rem !important; }
+[data-testid="stDataFrame"] th, [data-testid="stDataEditor"] th,
+[data-testid="stDataFrame"] th *, [data-testid="stDataEditor"] th * {
+    font-size: 0.88rem !important;  /* headers a touch smaller than the body */
+    font-weight: 600 !important;
+}
+/* Numeric cells inside glide-data-grid render as canvas so we can't
+   font-tune them per-column; the global cell bump above already
+   gives numbers ~15 px, which is what the spec asks for. */
+
+[data-testid="stTable"] table, [data-testid="stTable"] table * {
+    font-size: 0.92rem !important;
+}
+[data-testid="stTable"] td, [data-testid="stTable"] th {
+    padding: 6px 10px !important;
+}
 
 /* ==================================================================
    ALERTS + TOASTS
