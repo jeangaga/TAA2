@@ -117,6 +117,37 @@ def compute_rolling_vol(
     return out
 
 
+def compute_pairwise_rolling_corr(
+    returns: pd.DataFrame,
+    col_a: str,
+    col_b: str,
+    window: int,
+) -> pd.DataFrame:
+    """Pairwise rolling correlation between two return columns.
+
+    Returns a one-column DataFrame named ``corr(col_a, col_b)`` with the
+    same index as ``returns``. ``min_periods=window`` matches the NaN
+    warm-up philosophy of :func:`compute_rolling_vol` exactly — the
+    first ``window - 1`` rows are NaN by construction.
+
+    Returns an empty DataFrame if either column is missing.
+    """
+    if (
+        returns is None
+        or col_a not in returns.columns
+        or col_b not in returns.columns
+    ):
+        return pd.DataFrame()
+    a = pd.to_numeric(returns[col_a], errors="coerce")
+    b = pd.to_numeric(returns[col_b], errors="coerce")
+    return (
+        a.rolling(window=window, min_periods=window)
+         .corr(b)
+         .rename(f"corr({col_a}, {col_b})")
+         .to_frame()
+    )
+
+
 def compute_var_es(
     returns: pd.DataFrame,
     levels: Tuple[float, ...] = (0.95, 0.99),
