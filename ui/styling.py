@@ -150,14 +150,22 @@ button[data-testid="baseButton-primary"], button[data-testid="baseButton-seconda
    arbitrary per-column pixel widths. Small tables shrink naturally;
    wide tables use up to the full container.
    ------------------------------------------------------------------ */
+/* Streamlit wraps every widget in a flex-item container that defaults
+   to full width — so ``[data-testid="stTable"] table { width: auto }``
+   on its own doesn't shrink the visible block. We shrink the WRAPPER
+   itself with ``width: fit-content`` (bounded by the container via
+   ``max-width: 100%``) so the whole table block hugs its content and
+   whitespace opens up on the right. Any table wider than the
+   container gets a horizontal scroll strip via ``overflow-x: auto``. */
 [data-testid="stTable"] {
-    /* Container spans full width; the <table> inside collapses to
-       its natural content width (see the table selector below). */
+    width: fit-content !important;
+    max-width: 100% !important;
     overflow-x: auto !important;
+    display: block !important;
 }
 [data-testid="stTable"] table {
     width: auto !important;
-    max-width: 100% !important;
+    max-width: none !important;
     table-layout: auto !important;
     font-size: 0.94rem !important;   /* ≈ 16 px on the 17 px root */
     border-collapse: collapse !important;
