@@ -615,7 +615,7 @@ with tabs[0]:
     if len(trades_open) == 0:
         st.info("No open trades at this date.")
     else:
-        st.dataframe(trades_open[show_cols], use_container_width=True, hide_index=True)
+        render_table(trades_open[show_cols], hide_index=True)
         st.caption(
             f"{len(trades_open)} open trade rows · gross "
             f"{trades_open['Size'].abs().sum():+.4f} · net "
@@ -640,13 +640,12 @@ with tabs[1]:
         for c in ("Size", "GrossUnderlyingSize", "TradeCount"):
             if c in cb_view.columns:
                 cb_view[c] = pd.to_numeric(cb_view[c], errors="coerce")
-        st.dataframe(
+        render_table(
             cb_view.style.format({
                 "Size": "{:+.4f}",
                 "GrossUnderlyingSize": "{:.4f}",
                 "TradeCount": "{:.0f}",
             }, na_rep=""),
-            use_container_width=True,
             hide_index=True,
         )
         gross = current_book["Size"].abs().sum()
@@ -1120,13 +1119,12 @@ with tabs[4]:
                 [strat_part, summary_df[taa_mask]], ignore_index=True,
             )
 
-            st.dataframe(
+            render_table(
                 summary_df.style.format({
                     "Ann.Vol": "{:.2%}",
-                    "Risk Contrib %": "{:.1f}%",
+                    "Risk Contrib %": "{:.2f}%",
                     "Max.Drawdown": "{:.2%}",
                 }, na_rep=""),
-                use_container_width=True,
                 hide_index=True,
             )
 
@@ -1675,11 +1673,11 @@ with tabs[3]:
             "Gross": float(size.abs().sum()),
             "Net": float(size.sum()),
         })
-    st.dataframe(
+    render_table(
         pd.DataFrame(rows).style.format(
             {"Gross": "{:+.4f}", "Net": "{:+.4f}"}, na_rep=""
         ),
-        use_container_width=True, hide_index=True,
+        hide_index=True,
     )
 
     st.divider()
@@ -1692,12 +1690,12 @@ with tabs[3]:
         st.info("Book is empty.")
     else:
         insp_view = insp_book.reindex(
-            columns=["Strategy", "RIC", "RIC Name", "Size", "EntryDate", "ExitDate", "Comment"]
+            columns=["Strategy", "Asset", "Size", "EntryDate", "EntryLevel", "ExitDate", "ExitLevel", "Comment"]
         ).copy()
         insp_view["Size"] = pd.to_numeric(insp_view["Size"], errors="coerce")
-        st.dataframe(
+        render_table(
             insp_view.style.format({"Size": "{:+.4f}"}, na_rep=""),
-            use_container_width=True, hide_index=True,
+            hide_index=True,
         )
         # Quick jump into the construction workspace, pre-seeded with this book.
         jump_col, _ = st.columns([1, 3])
@@ -1764,11 +1762,11 @@ with tabs[3]:
                     "Gross": float(size.abs().sum()),
                     "Net": float(size.sum()),
                 })
-            st.dataframe(
+            render_table(
                 pd.DataFrame(snap_rows).style.format(
                     {"Gross": "{:+.4f}", "Net": "{:+.4f}"}, na_rep=""
                 ),
-                use_container_width=True, hide_index=True,
+                hide_index=True,
             )
         else:
             st.caption("No snapshots saved yet — you can still export the current scenario below.")
@@ -1963,9 +1961,7 @@ def _render_working_book_diagnostics() -> None:
             "still compute normally."
         )
         with st.expander("Positions with unmatched RIC Names"):
-            st.dataframe(
-                working_missing, use_container_width=True, hide_index=True,
-            )
+            render_table(working_missing, hide_index=True)
 
 
 # --------------------------------------------------------------------------
@@ -2531,13 +2527,12 @@ with tabs[6]:
                             },
                             index=[f"{w}d window"],
                         )
-                        st.dataframe(
+                        render_table(
                             summary.style.format({
                                 "Latest rolling correlation": "{:+.2f}",
                                 f"Latest rolling vol — {strat_a}": "{:.2%}",
                                 f"Latest rolling vol — {strat_b}": "{:.2%}",
                             }, na_rep=""),
-                            use_container_width=True,
                         )
 
         # ---- C. Tail risk: VaR / ES + worst N losses ----
@@ -2553,14 +2548,13 @@ with tabs[6]:
         if var_es.empty:
             st.info("No return observations available for VaR / ES.")
         else:
-            st.dataframe(
+            render_table(
                 var_es.style.format({
                     "HistVaR_95": "{:.2%}",
                     "HistES_95": "{:.2%}",
                     "HistVaR_99": "{:.2%}",
                     "HistES_99": "{:.2%}",
                 }, na_rep=""),
-                use_container_width=True,
             )
 
         st.markdown("**Worst 5 daily TAA losses**")
@@ -2574,9 +2568,8 @@ with tabs[6]:
         else:
             worst_disp = worst.copy()
             worst_disp["Date"] = pd.to_datetime(worst_disp["Date"]).dt.strftime("%Y-%m-%d")
-            st.dataframe(
+            render_table(
                 worst_disp.style.format({"Return": "{:+.2%}"}, na_rep=""),
-                use_container_width=True,
                 hide_index=True,
             )
 
@@ -2691,9 +2684,9 @@ with tabs[7]:
                     "RiskContribPct_cand": "{:.1f}%",
                     "RiskContribPct_Δ": "{:+.1f}%",
                 })
-                st.dataframe(
+                render_table(
                     tbl.style.format(fmt, na_rep=""),
-                    use_container_width=True, hide_index=True,
+                    hide_index=True,
                 )
 
         # ---- Position level ----
@@ -2709,13 +2702,13 @@ with tabs[7]:
                 for _c in ("OldSize", "NewSize", "Delta"):
                     if _c in view.columns:
                         view[_c] = pd.to_numeric(view[_c], errors="coerce")
-                st.dataframe(
+                render_table(
                     view.style.format({
                         "OldSize": "{:+.4f}",
                         "NewSize": "{:+.4f}",
                         "Delta": "{:+.4f}",
                     }, na_rep=""),
-                    use_container_width=True, hide_index=True,
+                    hide_index=True,
                 )
 
         # ---- Performance overlay ----
@@ -2743,18 +2736,14 @@ with tabs[8]:
         "share are computed from the last import; use the ⚙ Data Manager "
         "in the header to reload from GitHub / upload / Yahoo."
     )
-    st.dataframe(
-        dm.market_data_summary(asset_returns),
-        use_container_width=True,
-        hide_index=True,
-    )
+    render_table(dm.market_data_summary(asset_returns), hide_index=True)
     st.divider()
 
     st.subheader("Trade-book validation")
     if len(trades_bad) > 0:
         st.warning(f"{len(trades_bad)} trade rows were rejected for bad data "
                    "(missing Strategy / RIC Name / Size / EntryDate).")
-        st.dataframe(trades_bad, use_container_width=True, hide_index=True)
+        render_table(trades_bad, hide_index=True)
     else:
         st.success("All trade rows passed basic validation.")
 
@@ -2768,7 +2757,7 @@ with tabs[8]:
 
     if not missing_assets.empty:
         st.subheader("Open trades with missing asset data (zero contribution)")
-        st.dataframe(missing_assets, use_container_width=True, hide_index=True)
+        render_table(missing_assets, hide_index=True)
 
     st.subheader("Trade blotter diagnostics")
     diag = pd.DataFrame({
@@ -2795,12 +2784,12 @@ with tabs[8]:
             len(library),
         ],
     })
-    st.dataframe(diag, use_container_width=True, hide_index=True)
+    render_table(diag, hide_index=True)
 
     with st.expander("Raw inputs (preview)"):
         st.caption("Price data — head")
-        st.dataframe(eq_prices.head(), use_container_width=True)
+        render_table(eq_prices.head())
         st.caption("Rate data — head")
-        st.dataframe(rates_levels.head(), use_container_width=True)
+        render_table(rates_levels.head())
         st.caption("Raw trades")
-        st.dataframe(trades_raw, use_container_width=True, hide_index=True)
+        render_table(trades_raw, hide_index=True)
