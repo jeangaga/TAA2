@@ -29,6 +29,28 @@ def plot_cumulative(cum: pd.DataFrame, title: str = "Cumulative Performance") ->
     return fig
 
 
+def plot_timeseries(df: pd.DataFrame, title: str = "Time series") -> go.Figure:
+    """Generic non-cumulative line chart — one line per column.
+
+    Same visual language as :func:`plot_cumulative` (TAA highlighted,
+    same template / layout), intended for level series such as rolling
+    volatility or rolling correlation.
+    """
+    fig = go.Figure()
+    for col in df.columns:
+        width = 3 if col == "TAA" else 1.5
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df[col], mode="lines",
+            name=col, line=dict(width=width),
+        ))
+    fig.update_layout(
+        title=title, xaxis_title="Date", yaxis_title="Value",
+        template="plotly_white", height=500,
+        legend=dict(orientation="h", y=-0.2),
+    )
+    return fig
+
+
 def plot_drawdowns(dd: pd.DataFrame, title: str = "Drawdowns") -> go.Figure:
     """Drawdown lines, one per column."""
     fig = go.Figure()
