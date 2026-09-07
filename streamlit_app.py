@@ -45,7 +45,6 @@ from ui import books_library_tab
 from ui import contexts
 from ui import data_manager as dm
 from ui import data_quality_tab
-from ui import live_book_tab
 from ui import market_tab
 from ui import performance_tab
 from ui import raw_trades_tab
@@ -153,24 +152,31 @@ if demo_active:
         "**⚙ Data Manager** to replace the draft with your own book."
     )
 
+# Header metrics describe the WORKING book — the portfolio actually
+# being analysed — so they always match Performance / Risk. The Current
+# book is just one member of the library, inspectable there.
 top_cols = st.columns(6)
 top_cols[0].metric("Audit as-of date", str(trade_ctx.audit_as_of_ts.date()))
 top_cols[1].metric("Open trades (audit)", len(trade_ctx.open_audit))
-top_cols[2].metric("Live-book lines", len(trade_ctx.current_book))
+top_cols[2].metric("Working-book lines", len(working_ctx.book))
 top_cols[3].metric(
-    "Strategies open",
-    trade_ctx.current_book["Strategy"].nunique()
-    if len(trade_ctx.current_book) else 0,
+    "Working strategies",
+    working_ctx.book["Strategy"].nunique()
+    if len(working_ctx.book) and "Strategy" in working_ctx.book.columns else 0,
 )
 top_cols[4].metric("Books in library", len(library_ctx.library))
 top_cols[5].metric("Working book", working_book_name)
 
 # --------------------------------------------------------------------------
-# 5. Tabs — source order == UI order; every body is a delegated render()
+# 5. Tabs — source order == UI order; every body is a delegated render().
+# A BOOK IS A BOOK: Current, Imported, Scenario, Snapshot and Generated
+# books differ only by provenance/mutability, never by engine semantics,
+# so there is no dedicated Current/Live tab — the Books Library is the
+# inspection place and the Working Book selector is the single
+# portfolio-selection concept.
 # --------------------------------------------------------------------------
 tabs = st.tabs([
     "Raw Trades (audit)",
-    "Live Book",
     "Market",
     "Books Library",
     "Editable Scenario",
@@ -184,9 +190,6 @@ with tabs[0]:
     raw_trades_tab.render(trade_ctx)
 
 with tabs[1]:
-    live_book_tab.render(trade_ctx)
-
-with tabs[2]:
     market_tab.render(
         market_ctx.eq_prices,
         market_ctx.rates_levels,
@@ -194,10 +197,10 @@ with tabs[2]:
         ohlc_rates=market_ctx.ohlc_rates,
     )
 
-with tabs[3]:
+with tabs[2]:
     books_library_tab.render(library_ctx, trade_ctx)
 
-with tabs[4]:
+with tabs[3]:
     scenario_tools.render(
         library=library_ctx.library,
         current_book=trade_ctx.current_book,
@@ -208,14 +211,14 @@ with tabs[4]:
         active_ts=trade_ctx.active_ts,
     )
 
-with tabs[5]:
+with tabs[4]:
     performance_tab.render(working_ctx, library_ctx, market_ctx)
 
-with tabs[6]:
+with tabs[5]:
     risk_tab.render(working_ctx, library_ctx, market_ctx)
 
-with tabs[7]:
+with tabs[6]:
     book_comparison_tab.render(library_ctx, market_ctx, trade_ctx.active_ts)
 
-with tabs[8]:
+with tabs[7]:
     data_quality_tab.render(trade_ctx, market_ctx, working_ctx, library_ctx)
