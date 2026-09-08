@@ -65,8 +65,32 @@ def render(library_ctx: LibraryContext, trade_ctx: TradeContext) -> None:
 
     st.divider()
     st.markdown("### Inspect a book")
+    # Follow-until-diverged default: the inspect picker starts on the
+    # Working Book and keeps following it as long as the user hasn't
+    # manually picked a different book. A manual divergence is
+    # preserved across Working-Book changes. All session-state writes
+    # happen BEFORE the widget is instantiated (Streamlit rule).
+    book_names = list(library.keys())
+    wb_now = st.session_state.get("working_book_name")
+    prev_wb = st.session_state.get("_insp_prev_working_book")
+    if st.session_state.get("insp_name") not in book_names:
+        # First render, or the previously inspected book left the
+        # library — (re)default to the Working Book when possible.
+        st.session_state.pop("insp_name", None)
+        if wb_now in book_names:
+            st.session_state["insp_name"] = wb_now
+    elif (
+        wb_now != prev_wb
+        and st.session_state.get("insp_name") == prev_wb
+        and wb_now in book_names
+    ):
+        # The selection was tracking the Working Book and the Working
+        # Book changed — follow it.
+        st.session_state["insp_name"] = wb_now
+    st.session_state["_insp_prev_working_book"] = wb_now
+
     insp_name = st.selectbox(
-        "Pick a book to view", list(library.keys()), key="insp_name",
+        "Pick a book to view", book_names, key="insp_name",
     )
     insp_book = library[insp_name]
     if len(insp_book) == 0:

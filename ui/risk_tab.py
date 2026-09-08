@@ -20,12 +20,83 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from core import asset_registry as reg
 from core import beta, risk
 from core.config import TOTAL_COLUMN_NAME
 from ui import working_book as wb
 from ui.contexts import LibraryContext, MarketContext, WorkingContext
 from ui.tables import render_table
 from utils import plotting
+
+
+def _pm_size_label(size: float, asset: str, row_asset_class: str, registry) -> str:
+    """Format a canonical Size in PM units — same economic convention as
+    the Editable Scenario editor.
+
+    Registry ``AssetClass`` (by canonical ``Asset``) decides the unit,
+    never the numeric value: Rate → duration in years (canonical
+    passthrough, ``+0.20y``); FX / Equity / unknown → percentage
+    exposure (canonical × 100, ``+1.00%``). Falls back to the row's own
+    ``AssetClass`` for unregistered assets.
+    """
+    asset_class = ""
+    if registry is not None and not registry.empty and asset:
+        entry = reg.lookup(registry, asset)
+        if entry is not None:
+            asset_class = entry.asset_class
+    if not asset_class:
+        asset_class = str(row_asset_class or "").strip()
+    if asset_class.lower() == "rate":
+        return f"{size:+.2f}y"
+    return f"{size * 100.0:+.2f}%"
+
+
+def _render_working_positions(working_ctx: WorkingContext) -> None:
+    """Compact Strategy / Asset / Size view of the EXACT rows feeding the
+    risk numbers below (``working_ctx.book`` — the active-date
+    materialisation). Every leg of a multi-leg strategy is shown."""
+    book = working_ctx.book
+    if book is None or len(book) == 0:
+        # The working-book diagnostics already explain an empty book.
+        return
+    try:
+        registry = reg.load_registry()
+    except Exception:  # noqa: BLE001
+        registry = None
+    rows = []
+    for _, r in book.iterrows():
+        size = pd.to_numeric(r.get("Size"), errors="coerce")
+        rows.append({
+            "Strategy": str(r.get("Strategy", "") or "").strip(),
+            "Asset": str(r.get("Asset", "") or "").strip(),
+            "Size": (
+                _pm_size_label(
+                    float(size), str(r.get("Asset", "") or "").strip(),
+                    r.get("AssetClass", ""), registry,
+                )
+                if pd.notna(size) else "—"
+            ),
+        })
+    view = pd.DataFrame(rows, columns=["Strategy", "Asset", "Size"])
+    n_strats = (
+        book["Strategy"].astype(str).str.strip().replace("", pd.NA).dropna().nunique()
+        if "Strategy" in book.columns else 0
+    )
+    header = (
+        f"Working book positions · {len(view)} line(s) / "
+        f"{int(n_strats)} strategie(s)"
+    )
+    if len(view) > 20:
+        with st.expander(header, expanded=True):
+            render_table(view, hide_index=True)
+    else:
+        st.markdown(f"**{header}**")
+        render_table(view, hide_index=True)
+    st.caption(
+        "These are exactly the positions generating the risk numbers "
+        "below (active at today's date). FX / Equity in % exposure, "
+        "Rates in duration years."
+    )
 
 
 def render(
@@ -46,6 +117,7 @@ def render(
     )
     wb.render_tab_picker("risk", library_ctx, working_ctx)
     wb.render_diagnostics(working_ctx, market_ctx)
+    _render_working_positions(working_ctx)
     if strategy_returns.empty or strategy_returns.shape[1] == 0:
         st.warning("No strategy returns available for this book.")
     else:
