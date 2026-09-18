@@ -16,7 +16,8 @@ once per header-button click and closes on any Import / Refresh action
 avoids the "modal keeps re-appearing" bug caused by a persistent
 session flag.
 
-Inside the dialog, each sub-tab (GitHub / Upload / Yahoo) is wrapped in
+Inside the dialog, each sub-tab (GitHub / Upload / Yahoo / Official
+Rates) is wrapped in
 ``@st.fragment`` so widget interactions rerun only that fragment — the
 dialog itself stays open through multi-select changes, tab switches,
 and preview updates. The Import buttons call ``st.rerun(scope="app")``
@@ -48,7 +49,9 @@ import pandas as pd
 import streamlit as st
 
 from core import asset_registry as reg
+from core import data as core_data
 from core.adapters import github as gh_adapter
+from core.adapters import official_rates as official_adapter
 from core.adapters import upload as upload_adapter
 from core.adapters import yahoo as yahoo_adapter
 from ui.tables import render_table
@@ -620,6 +623,189 @@ def _yahoo_fragment() -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# Official Rates — U.S. Treasury + Bundesbank ingestion into the EXISTING
+# `rates` slot. No new slot, no OHLC (level series only), preview before
+# import, and a provider failure never touches the current Rates data.
+# --------------------------------------------------------------------------
+@_fragment
+def _official_rates_fragment() -> None:
+    st.caption(
+        "Official government-yield sources, merged into the existing "
+        "**Rates** slot. U.S. yields: Treasury Daily Par Yield Curve · "
+        "Germany: Bundesbank current federal-security yields. Values are "
+        "yield levels in percentage points."
+    )
+
+    period = st.selectbox(
+        "Period",
+        official_adapter.PERIOD_CHOICES,
+        index=official_adapter.PERIOD_CHOICES.index("2y"),
+        key="dm_or_period",
+        help="One shared date window sent to every provider.",
+    )
+    start_date, end_date = official_adapter.period_to_dates(period)
+
+    st.markdown("**Rates to import**")
+    selected: list[str] = []
+    for name, series_spec in official_adapter.OFFICIAL_RATE_SERIES.items():
+        picked = st.checkbox(
+            f"{name} — {series_spec['source']}",
+            value=name in official_adapter.DEFAULT_OFFICIAL_SELECTION,
+            key=f"dm_or_pick_{name.replace(' ', '_')}",
+        )
+        if picked:
+            selected.append(name)
+    st.caption(
+        "Effective official-rates universe: "
+        + (", ".join(selected) if selected else "(nothing selected)")
+    )
+
+    if st.button("Preview", key="dm_or_preview_btn", disabled=not selected):
+        with st.spinner("Fetching official rates…"):
+            frame, sources, errors = official_adapter.fetch_official_rates(
+                selected, start_date=start_date, end_date=end_date,
+            )
+        st.session_state["_or_preview"] = {
+            "frame": frame,
+            "sources": sources,
+            "errors": errors,
+            "window": (start_date, end_date),
+            "selected": tuple(sorted(selected)),
+        }
+
+    prev = st.session_state.get("_or_preview")
+    if not prev:
+        st.info("Pick series and click **Preview** — nothing is written until you import.")
+        return
+
+    # Provider errors are informational: successes remain importable and
+    # the existing Rates slot is never touched by a failed request.
+    for err in prev["errors"]:
+        st.error(
+            f"{err['provider']} — {err['series']}: {err['error']} "
+            "(existing Rates data untouched)"
+        )
+
+    frame = prev["frame"]
+    if frame is None or frame.empty:
+        if not prev["errors"]:
+            st.info("No observations returned for the selected window.")
+        return
+
+    stale = (
+        prev["selected"] != tuple(sorted(selected))
+        or prev["window"] != (start_date, end_date)
+    )
+    if stale:
+        st.warning(
+            "Selection or period changed since this preview — click "
+            "**Preview** again before importing."
+        )
+
+    summary_rows = []
+    for col in frame.columns:
+        s = frame[col].dropna()
+        summary_rows.append({
+            "Series": str(col),
+            "Source": prev["sources"].get(str(col), "?"),
+            "Start": s.index.min().strftime("%Y-%m-%d") if len(s) else "—",
+            "End": s.index.max().strftime("%Y-%m-%d") if len(s) else "—",
+            "Observations": int(s.size),
+        })
+    render_table(pd.DataFrame(summary_rows), hide_index=True)
+
+    st.caption("Last 10 observations (yield levels, %)")
+    tail = frame.tail(10).copy()
+    tail.index = tail.index.strftime("%Y-%m-%d")
+    tail.index.name = "Date"
+    render_table(tail.style.format("{:.2f}", na_rep="—"))
+
+    if st.button(
+        "Import official rates",
+        type="primary",
+        key="dm_or_import_btn",
+        disabled=stale,
+    ):
+        if _official_do_import(frame, prev["sources"]):
+            st.session_state.pop("_or_preview", None)
+            _rerun_app()
+
+
+def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
+    """Merge the previewed official series into the `rates` slot.
+
+    MERGE, never replace: the existing rates universe survives; a
+    same-named canonical column takes the newly downloaded official
+    values (outer join on Date). Per-asset provenance lands in
+    ``meta['sources_by_asset']``; stale OHLC for overwritten canonical
+    series is dropped (official yields are level series — no OHLC is
+    ever synthesized).
+    """
+    existing_bytes = get_bytes("rates")
+    prev_source = get_source("rates")
+    prev_meta = get_meta("rates")
+
+    existing = pd.DataFrame()
+    if existing_bytes:
+        try:
+            existing = core_data.load_rate_data(existing_bytes)
+        except Exception as e:  # noqa: BLE001
+            st.error(
+                f"Existing Rates slot could not be parsed ({e}) — import "
+                "aborted; the slot was left untouched."
+            )
+            return False
+
+    merged = official_adapter.merge_rate_frames(existing, new_frame)
+    merged.index.name = "Date"
+    payload = upload_adapter.normalise_to_csv_bytes(merged.reset_index())
+
+    # Per-asset provenance: carry forward what we know, tag untagged
+    # pre-existing columns with the slot's previous source label, then
+    # let the official providers win on the columns they delivered.
+    sources_by_asset = dict(prev_meta.get("sources_by_asset") or {})
+    if existing is not None and len(existing.columns):
+        for c in existing.columns:
+            sources_by_asset.setdefault(str(c), prev_source or "unknown")
+    sources_by_asset.update({str(k): v for k, v in new_sources.items()})
+    sources_by_asset = {
+        k: v for k, v in sources_by_asset.items()
+        if k in set(map(str, merged.columns))
+    }
+
+    official_labels = {official_adapter.US_TREASURY, official_adapter.BUNDESBANK}
+    all_official = all(
+        sources_by_asset.get(str(c)) in official_labels for c in merged.columns
+    )
+    top_source = "official" if all_official else "mixed"
+
+    # Level series only: never synthesize OHLC, and drop stale candles
+    # for any canonical series the official data just overwrote.
+    overwritten = set(map(str, new_frame.columns))
+    kept_ohlc = {
+        k: v for k, v in get_ohlc("rates").items() if str(k) not in overwritten
+    }
+
+    set_data(
+        "rates",
+        payload,
+        top_source,
+        {
+            "providers": sorted({v for v in new_sources.values()}),
+            "sources_by_asset": sources_by_asset,
+            **_summarise_csv(payload),
+        },
+        ohlc=kept_ohlc,
+    )
+    st.success(
+        "Rates slot updated: "
+        + ", ".join(map(str, merged.columns))
+        + f" · source: {top_source}"
+    )
+    return True
+
+
 @_fragment
 def _loaded_fragment() -> None:
     demo_on = _is_demo_active()
@@ -808,7 +994,7 @@ def _maybe_toast_autoload_empties() -> None:
 # --------------------------------------------------------------------------
 @st.dialog("Data Manager", width="large")
 def _dialog_body() -> None:
-    tab_labels = ["GitHub", "File Upload", "Yahoo Finance"]
+    tab_labels = ["GitHub", "File Upload", "Yahoo Finance", "Official Rates"]
     tabs = st.tabs(tab_labels)
     with tabs[0]:
         _github_fragment()
@@ -816,6 +1002,8 @@ def _dialog_body() -> None:
         _upload_fragment()
     with tabs[2]:
         _yahoo_fragment()
+    with tabs[3]:
+        _official_rates_fragment()
     st.divider()
     _loaded_fragment()
 
