@@ -29,7 +29,9 @@ Public surface
 * ``init_state()``                          — call once per rerun.
 * ``get_bytes / get_source / get_meta``     — slot accessors.
 * ``set_data`` / ``clear_data``.
-* ``ready()``                               — prices + rates loaded.
+* ``ready()``                               — any market data loaded
+                                              (Prices only / Rates only
+                                              / both all count).
 * ``set_demo_active(flag)``                 — main app tells DM whether
                                               the Demo Book is standing
                                               in for Trades.
@@ -102,7 +104,6 @@ DATA_FILENAMES = {
     "trades": "TradesPAT.csv",
     "books": "Books.csv",
 }
-REQUIRED_KEYS = ["eq", "rates"]  # trades optional (Demo Book stands in)
 
 
 # --------------------------------------------------------------------------
@@ -165,7 +166,13 @@ def clear_data(key: str) -> None:
 
 
 def ready() -> bool:
-    return all(get_bytes(k) is not None for k in REQUIRED_KEYS)
+    """True when ANY market-data slot is loaded.
+
+    The app supports Prices only, Rates only, or both, and stops only
+    when neither is present — this mirrors the entry point's
+    partial-slots input gate (``MarketContext.has_any``).
+    """
+    return bool(get_bytes("eq") or get_bytes("rates"))
 
 
 def set_demo_active(active: bool) -> None:
@@ -216,8 +223,7 @@ def _short_date(iso_ts: str | None) -> str:
 def render_status_pill() -> str:
     if ready():
         return "Data: ✓ Ready"
-    missing = [DATA_LABELS[k] for k in REQUIRED_KEYS if get_bytes(k) is None]
-    return f"Data: ⚠ Missing {', '.join(missing)}"
+    return "Data: ⚠ No market data (Prices / Rates)"
 
 
 def render_status_line() -> str:
@@ -732,15 +738,50 @@ def _official_rates_fragment() -> None:
             _rerun_app()
 
 
-def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
-    """Merge the previewed official series into the `rates` slot.
+def _naive_date_index(df: pd.DataFrame) -> pd.DataFrame:
+    """Return ``df`` with a timezone-naive DatetimeIndex named ``Date``.
 
-    MERGE, never replace: the existing rates universe survives; a
-    same-named canonical column takes the newly downloaded official
-    values (outer join on Date). Per-asset provenance lands in
-    ``meta['sources_by_asset']``; stale OHLC for overwritten canonical
-    series is dropped (official yields are level series — no OHLC is
-    ever synthesized).
+    Yahoo indexes can arrive tz-aware while slot dates are naive; the
+    Rates slot contract is tz-naive (§ Date contract), so every frame
+    entering the merge is normalised here.
+    """
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    idx = pd.to_datetime(out.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    out.index = idx.normalize()
+    out.index.name = "Date"
+    return out[~out.index.duplicated(keep="last")].sort_index()
+
+
+def _merge_rates_into_slot(
+    new_frame: pd.DataFrame,
+    new_sources: dict,
+    new_ohlc: dict,
+    *,
+    extra_meta: dict | None = None,
+    silent: bool = False,
+) -> bool:
+    """THE rates-slot merge writer — shared by Official Rates and Yahoo
+    Rates imports so both follow one canonical contract.
+
+    * MERGE, never replace: outer join on Date; for a same-named
+      canonical column the newly downloaded non-null values win and
+      existing values survive where the new download has none. The
+      pre-existing rates universe is never dropped. No ``_x``/``_y``.
+    * Provenance: ``meta['sources_by_asset']`` carries per-asset source
+      labels forward; only the delivered columns change owner. The
+      top-level slot source is the single shared label when one source
+      covers everything, ``"official"`` when the official family
+      (U.S. Treasury + Bundesbank) covers everything, else ``"mixed"``.
+    * OHLC: a delivered asset's candles are replaced by ``new_ohlc``
+      (empty for official level series — nothing is synthesized, and a
+      stale Yahoo candle for an overwritten series is dropped);
+      unrelated assets keep their candles.
+    * Failure safety: a parse failure of the existing slot aborts
+      BEFORE any write — the slot is never cleared or half-written.
     """
     existing_bytes = get_bytes("rates")
     prev_source = get_source("rates")
@@ -751,19 +792,22 @@ def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
         try:
             existing = core_data.load_rate_data(existing_bytes)
         except Exception as e:  # noqa: BLE001
-            st.error(
-                f"Existing Rates slot could not be parsed ({e}) — import "
-                "aborted; the slot was left untouched."
-            )
+            if not silent:
+                st.error(
+                    f"Existing Rates slot could not be parsed ({e}) — import "
+                    "aborted; the slot was left untouched."
+                )
             return False
 
-    merged = official_adapter.merge_rate_frames(existing, new_frame)
+    merged = official_adapter.merge_rate_frames(
+        _naive_date_index(existing), _naive_date_index(new_frame),
+    )
     merged.index.name = "Date"
     payload = upload_adapter.normalise_to_csv_bytes(merged.reset_index())
 
     # Per-asset provenance: carry forward what we know, tag untagged
-    # pre-existing columns with the slot's previous source label, then
-    # let the official providers win on the columns they delivered.
+    # pre-existing columns with the slot's previous top-level label,
+    # then let the delivering source win on the columns it delivered.
     sources_by_asset = dict(prev_meta.get("sources_by_asset") or {})
     if existing is not None and len(existing.columns):
         for c in existing.columns:
@@ -775,17 +819,24 @@ def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
     }
 
     official_labels = {official_adapter.US_TREASURY, official_adapter.BUNDESBANK}
-    all_official = all(
-        sources_by_asset.get(str(c)) in official_labels for c in merged.columns
-    )
-    top_source = "official" if all_official else "mixed"
+    distinct = {sources_by_asset.get(str(c), "unknown") for c in merged.columns}
+    if distinct and distinct <= official_labels:
+        top_source = "official"
+    elif len(distinct) == 1:
+        top_source = next(iter(distinct))
+    else:
+        top_source = "mixed"
 
-    # Level series only: never synthesize OHLC, and drop stale candles
-    # for any canonical series the official data just overwrote.
-    overwritten = set(map(str, new_frame.columns))
+    # OHLC follows the delivered columns: replaced where the source
+    # brought candles, dropped where a level-only source overwrote the
+    # series, preserved everywhere else.
+    delivered = set(map(str, new_frame.columns))
     kept_ohlc = {
-        k: v for k, v in get_ohlc("rates").items() if str(k) not in overwritten
+        k: v for k, v in get_ohlc("rates").items() if str(k) not in delivered
     }
+    kept_ohlc.update({
+        str(k): v for k, v in (new_ohlc or {}).items() if str(k) in delivered
+    })
 
     set_data(
         "rates",
@@ -794,16 +845,28 @@ def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
         {
             "providers": sorted({v for v in new_sources.values()}),
             "sources_by_asset": sources_by_asset,
+            **(extra_meta or {}),
             **_summarise_csv(payload),
         },
         ohlc=kept_ohlc,
     )
-    st.success(
-        "Rates slot updated: "
-        + ", ".join(map(str, merged.columns))
-        + f" · source: {top_source}"
-    )
+    if not silent:
+        st.success(
+            "Rates slot updated (merged): "
+            + ", ".join(map(str, merged.columns))
+            + f" · source: {top_source}"
+        )
     return True
+
+
+def _official_do_import(new_frame: pd.DataFrame, new_sources: dict) -> bool:
+    """Merge the previewed official series into the `rates` slot.
+
+    Thin wrapper over :func:`_merge_rates_into_slot` — official yields
+    are level series, so no OHLC is ever delivered (which also drops a
+    stale Yahoo candle for any canonical series this import overwrites).
+    """
+    return _merge_rates_into_slot(new_frame, new_sources, {})
 
 
 @_fragment
@@ -823,9 +886,24 @@ def _loaded_fragment() -> None:
                 cols[1].caption("— not loaded")
         else:
             m = get_meta(k)
-            cols[1].caption(
-                f"{src} · {m.get('filename', '')} · {m.get('rows', '?')} rows"
-            )
+            by_asset = m.get("sources_by_asset") or {}
+            if by_asset:
+                # Multi-source-capable slot (Rates): compact summary +
+                # per-asset provenance on a dim second line.
+                cols[1].caption(
+                    f"{src} · {len(by_asset)} asset(s) · "
+                    f"{m.get('rows', '?')} rows"
+                )
+                prov = " · ".join(
+                    f"{a}: {s}" for a, s in list(by_asset.items())[:8]
+                )
+                if len(by_asset) > 8:
+                    prov += " …"
+                cols[1].caption(prov)
+            else:
+                cols[1].caption(
+                    f"{src} · {m.get('filename', '')} · {m.get('rows', '?')} rows"
+                )
         if src is not None and cols[2].button("Clear", key=f"dm_clear_{k}"):
             clear_data(k)
             _rerun_app()
@@ -907,8 +985,44 @@ def _yahoo_do_import(
             st.error("Yahoo returned no usable rows for the requested tickers.")
         return False
 
-    payload = yahoo_adapter.close_frame_to_csv_bytes(close)
     ohlc_dict = yahoo_adapter.to_ohlc_dict(non_empty)
+
+    # Rates is a MULTI-SOURCE slot: Yahoo delivers incremental canonical
+    # series that MERGE into whatever is already there (Official Rates /
+    # earlier Yahoo pulls), exactly like the Official Rates import — a
+    # Yahoo refresh of UST 10Y must never delete UST 2Y / DE 2Y. Prices
+    # keeps its established replace semantics (authoritative pull of the
+    # selected universe).
+    if slot == "rates":
+        ok = _merge_rates_into_slot(
+            close,
+            {str(c): "yahoo" for c in close.columns},
+            ohlc_dict,
+            extra_meta={
+                "filename": f"yahoo_{label}_{period}.csv",
+                "tickers": len(tickers),
+                "series_ok": close.shape[1],
+                "empties": empties,
+            },
+            silent=True,  # message emitted below with the empties detail
+        )
+        if not ok:
+            if not silent:
+                st.error("Rates merge aborted — existing slot left untouched.")
+            return False
+        if not silent:
+            msg = (
+                f"Rates slot updated (merged) from Yahoo · "
+                f"{close.shape[1]}/{len(tickers)} series"
+            )
+            if empties:
+                preview = ", ".join(empties[:6]) + (" …" if len(empties) > 6 else "")
+                st.warning(f"{msg}. Unavailable on Yahoo: {preview}")
+            else:
+                st.success(msg)
+        return True
+
+    payload = yahoo_adapter.close_frame_to_csv_bytes(close)
     set_data(
         slot,
         payload,

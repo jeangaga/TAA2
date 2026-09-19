@@ -18,7 +18,6 @@ Streamlit-only; consumes the already-loaded ``eq_prices`` and
 """
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -26,80 +25,38 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from core import asset_registry as reg
+from core import market_snippets as snip
+from core import market_views as mv
 from core import technical as tech
 from ui.tables import render_table
 
 
-# --------------------------------------------------------------------------
-# Stat helpers — percentage returns for prices, basis points for yields
-# --------------------------------------------------------------------------
-def _pct_change(series: pd.Series, periods: int) -> float | None:
-    s = series.dropna()
-    if len(s) < periods + 1:
-        return None
-    prev = s.iloc[-periods - 1]
-    if prev == 0 or pd.isna(prev):
-        return None
-    return (s.iloc[-1] / prev - 1) * 100.0
+def _code_popover(snippet: str, *, key: str, container=None) -> None:
+    """Compact </> Code control: research snippet + copyable setup cell.
 
+    Pure formatting — building the snippet never touches the network or
+    session state; it only renders an already-known UI state as Python.
+    """
+    target = container if container is not None else st
+    with target.popover("</> Code", use_container_width=True):
+        st.caption(
+            "Standalone research snippet — same extraction core, same "
+            "transformed values as this view. Run the setup cell once "
+            "per notebook first."
+        )
+        st.code(snippet, language="python")
+        st.download_button(
+            "Download .txt", snippet,
+            file_name=f"{key}.txt", mime="text/plain",
+            key=f"code_dl_{key}",
+        )
+        with st.expander("Setup cell (run once per notebook)"):
+            st.code(snip.build_setup_snippet(), language="python")
 
-def _bp_change(series: pd.Series, periods: int) -> float | None:
-    """Yield change in basis points assuming series is in percent."""
-    s = series.dropna()
-    if len(s) < periods + 1:
-        return None
-    return (s.iloc[-1] - s.iloc[-periods - 1]) * 100.0
-
-
-def _ytd_pct(series: pd.Series) -> float | None:
-    s = series.dropna()
-    if s.empty:
-        return None
-    year = s.index[-1].year
-    ytd = s[s.index.year == year]
-    if len(ytd) < 2 or ytd.iloc[0] == 0:
-        return None
-    return (ytd.iloc[-1] / ytd.iloc[0] - 1) * 100.0
-
-
-def _ytd_bp(series: pd.Series) -> float | None:
-    s = series.dropna()
-    if s.empty:
-        return None
-    year = s.index[-1].year
-    ytd = s[s.index.year == year]
-    if len(ytd) < 2:
-        return None
-    return (ytd.iloc[-1] - ytd.iloc[0]) * 100.0
-
-
-def _summary_table(frame: pd.DataFrame, is_rate: bool) -> pd.DataFrame:
-    if frame is None or frame.empty:
-        return pd.DataFrame()
-    unit = "bp" if is_rate else "%"
-    rows: list[dict] = []
-    for col in frame.columns:
-        s = frame[col].dropna()
-        if s.empty:
-            continue
-        d1 = _bp_change(s, 1) if is_rate else _pct_change(s, 1)
-        w1 = _bp_change(s, 5) if is_rate else _pct_change(s, 5)
-        m1 = _bp_change(s, 21) if is_rate else _pct_change(s, 21)
-        ytd = _ytd_bp(s) if is_rate else _ytd_pct(s)
-        y1 = _bp_change(s, 252) if is_rate else _pct_change(s, 252)
-        rows.append({
-            "Asset": col,
-            "Rows": len(s),
-            "Start": s.index[0].strftime("%Y-%m-%d"),
-            "End": s.index[-1].strftime("%Y-%m-%d"),
-            "Last": round(float(s.iloc[-1]), 4),
-            f"1D ({unit})": d1,
-            f"1W ({unit})": w1,
-            f"1M ({unit})": m1,
-            f"YTD ({unit})": ytd,
-            f"1Y ({unit})": y1,
-        })
-    return pd.DataFrame(rows)
+# All market data preparation (summary stats, frame resolution, window
+# ranges, technical / compare views) lives in `core.market_views` so a
+# plain notebook reproduces exactly what this tab displays. This module
+# keeps ONLY Streamlit widgets and Plotly rendering.
 
 
 def render(
@@ -130,6 +87,7 @@ def render(
         registry = reg.load_registry()
         core_names = reg.core_assets(registry)
     except Exception:  # noqa: BLE001
+        registry = None
         core_names = []
 
     loaded_cols = set(map(str, eq_prices.columns if eq_prices is not None else []))
@@ -155,18 +113,34 @@ def render(
     st.divider()
 
     # ---- Prices section
-    st.markdown("**Loaded prices (Equity + FX)**")
+    p_hdr, p_code = st.columns([5, 1])
+    p_hdr.markdown("**Loaded prices (Equity + FX)**")
     if eq_prices is None or eq_prices.empty:
         st.info("No price data loaded.")
     else:
-        table = _summary_table(eq_prices, is_rate=False)
+        _code_popover(
+            snip.build_market_summary_snippet(
+                assets=list(map(str, eq_prices.columns)),
+                is_rate=False, registry=registry,
+            ),
+            key="market_summary_prices", container=p_code,
+        )
+        table = mv.build_market_summary(eq_prices, is_rate=False)
         render_table(table)
 
-    st.markdown("**Loaded rates (yield levels)**")
+    r_hdr, r_code = st.columns([5, 1])
+    r_hdr.markdown("**Loaded rates (yield levels)**")
     if rates_levels is None or rates_levels.empty:
         st.info("No rate data loaded.")
     else:
-        table = _summary_table(rates_levels, is_rate=True)
+        _code_popover(
+            snip.build_market_summary_snippet(
+                assets=list(map(str, rates_levels.columns)),
+                is_rate=True, registry=registry,
+            ),
+            key="market_summary_rates", container=r_code,
+        )
+        table = mv.build_market_summary(rates_levels, is_rate=True)
         render_table(table)
 
     st.divider()
@@ -240,41 +214,15 @@ def _render_asset_explorer(
         )
 
 
-def _resolve_frame(
-    asset: str,
-    eq_prices: pd.DataFrame,
-    rates_levels: pd.DataFrame,
-    ohlc_eq: dict,
-    ohlc_rates: dict,
-) -> tuple[pd.DataFrame | None, bool]:
-    """Return ``(frame, is_rate)`` for a single asset.
-
-    Prefers the OHLC dict (Yahoo-sourced), falls back to a Close-only
-    frame built from the wide close DataFrame. ``frame is None`` when
-    the asset resolves nowhere.
-    """
-    rates_cols = set(map(str, rates_levels.columns)) if rates_levels is not None else set()
-    is_rate = asset in rates_cols
-    ohlc_dict = ohlc_rates if is_rate else ohlc_eq
-    if asset in ohlc_dict and not ohlc_dict[asset].empty:
-        return ohlc_dict[asset], is_rate
-    src = rates_levels if is_rate else eq_prices
-    if src is None or asset not in src.columns:
-        return None, is_rate
-    close = src[asset].dropna()
-    if close.empty:
-        return None, is_rate
-    return close.to_frame(name="Close"), is_rate
-
-
 def _resolve_window(range_label: str, end: pd.Timestamp, custom_key: str) -> pd.Timestamp:
+    """Custom-date widget stays in the UI; pure ranges come from core."""
     if range_label == "Custom":
         default_start = (end - pd.DateOffset(months=6)).date()
         custom = st.date_input(
             "Custom start date", value=default_start, key=custom_key,
         )
         return pd.Timestamp(custom)
-    return _range_start(range_label, end)
+    return mv.range_start(range_label, end)
 
 
 def _render_explorer_single(
@@ -317,7 +265,7 @@ def _render_explorer_single(
     show_daily = o3.checkbox("Daily returns", value=False, key="ae_single_daily")
     large_mode = o4.checkbox("Large", value=False, key="ae_single_large")
 
-    frame, is_rate = _resolve_frame(asset, eq_prices, rates_levels, ohlc_eq, ohlc_rates)
+    frame, is_rate = mv.resolve_frame(asset, eq_prices, rates_levels, ohlc_eq, ohlc_rates)
     if frame is None:
         st.warning(f"No data for **{asset}**.")
         return
@@ -327,7 +275,7 @@ def _render_explorer_single(
 
     # Compact metrics header (reuses the Scan Board renderer so numbers
     # match one-for-one between the two views).
-    ctx = _compute_asset_context(frame, start, end, is_rate)
+    ctx = mv.compute_asset_context(frame, start, end, is_rate)
     if ctx is not None:
         metrics, supports, resistances = ctx
         _render_technical_metrics(asset, metrics, supports, resistances, is_rate, show_sr)
@@ -356,6 +304,24 @@ def _render_explorer_single(
             explorer_mode=True,
         )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    # </> Code — reproduce THIS view (current asset + options) in a notebook.
+    try:
+        _snip_registry = reg.load_registry()
+    except Exception:  # noqa: BLE001
+        _snip_registry = None
+    code_col, _ = st.columns([1, 5])
+    _code_popover(
+        snip.build_market_single_snippet(
+            asset=asset,
+            window_start=start, window_end=end,
+            chart_type=chart_type, view_mode=view_mode,
+            active_mas=list(active_mas),
+            show_sr=show_sr, show_rsi=show_rsi, show_daily=show_daily,
+            is_rate=is_rate, registry=_snip_registry,
+        ),
+        key="market_single", container=code_col,
+    )
 
 
 def _render_explorer_compare(
@@ -388,7 +354,7 @@ def _render_explorer_compare(
         return
 
     loaded_rates_list = list(rates_levels.columns) if rates_levels is not None else []
-    frames = _build_frames(
+    frames = mv.build_frames(
         selected, loaded_rates_list,
         eq_prices, rates_levels, ohlc_eq, ohlc_rates,
     )
@@ -403,37 +369,38 @@ def _render_explorer_compare(
     end = max(end_candidates)
     start = _resolve_window(range_label, end, "ae_compare_custom")
 
-    _render_compare_metrics(frames, start, end)
-    fig = _build_compare_chart(frames, start, end, view_mode, large_mode)
+    # One pure compare view feeds both the metrics line and the chart.
+    cmp_view = mv.build_compare_view(frames, start, end, view_mode)
+    _render_compare_metrics(cmp_view)
+    fig = _build_compare_chart(cmp_view, start, end, large_mode)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+    # </> Code — reproduce THIS compare selection in a notebook.
+    try:
+        _snip_registry = reg.load_registry()
+    except Exception:  # noqa: BLE001
+        _snip_registry = None
+    code_col, _ = st.columns([1, 5])
+    _code_popover(
+        snip.build_market_compare_snippet(
+            assets=list(selected),
+            window_start=start, window_end=end,
+            view_mode=view_mode, registry=_snip_registry,
+        ),
+        key="market_compare", container=code_col,
+    )
 
-def _render_compare_metrics(
-    frames_by_asset: dict[str, tuple[pd.DataFrame, bool]],
-    window_start: pd.Timestamp,
-    window_end: pd.Timestamp,
-) -> None:
+
+def _render_compare_metrics(cmp_view: mv.CompareView) -> None:
     """Compact ``ASSET +X.YY% · ASSET +Z.ZZ%`` line above the compare chart.
 
-    Rates render in **bp**; everything else in **%**. Colour green up
-    / red down.
+    Rates render in **bp**; everything else in **%** (labels prepared
+    by ``core.market_views.build_compare_view``). Colour green up /
+    red down.
     """
     parts: list[str] = []
-    for asset, (frame, is_rate) in frames_by_asset.items():
-        close = tech.close_of(frame).dropna()
-        win = close[(close.index >= window_start) & (close.index <= window_end)]
-        if len(win) < 2:
-            continue
-        first = float(win.iloc[0])
-        last = float(win.iloc[-1])
-        if is_rate:
-            perf = (last - first) * 100.0  # bp
-            txt = f"{perf:+.0f}bp"
-        else:
-            if first == 0:
-                continue
-            perf = (last / first - 1) * 100.0
-            txt = f"{perf:+.2f}%"
+    for asset, txt in cmp_view.perf_label.items():
+        perf = cmp_view.perf[asset]
         colour = "#2ca02c" if perf >= 0 else "#d62728"
         parts.append(
             f"<b>{asset}</b> <span style='color:{colour}'>{txt}</span>"
@@ -448,33 +415,22 @@ def _render_compare_metrics(
 
 
 def _build_compare_chart(
-    frames_by_asset: dict[str, tuple[pd.DataFrame, bool]],
+    cmp_view: mv.CompareView,
     window_start: pd.Timestamp,
     window_end: pd.Timestamp,
-    view_mode: str,
     large_mode: bool = False,
 ) -> go.Figure:
     """Multi-asset overlay chart. Rebased-100 by default; Level allowed.
 
+    Pure Plotly: the display series (rebased for prices, raw levels
+    for rates) are prepared by ``core.market_views.build_compare_view``.
     Reuses the Scan-Board chart conventions: right y-axis, shared
     x-range, no OHLC bottom slider, clean legend on top. No MA / S/R
     / RSI overlays — those are for Single asset technical analysis;
     Compare is a relative-performance view.
     """
     fig = go.Figure()
-    for i, (asset, (frame, is_rate)) in enumerate(frames_by_asset.items()):
-        close = tech.close_of(frame).dropna()
-        window_mask = (close.index >= window_start) & (close.index <= window_end)
-        win = close[window_mask]
-        if win.empty:
-            continue
-        # Rebase to 100 for price-type assets only. Rates always plot
-        # as raw yield level regardless of the toggle — rebasing a
-        # yield level is not meaningful.
-        if view_mode == "Rebased 100" and not is_rate and float(win.iloc[0]) != 0:
-            y = (win / float(win.iloc[0])) * 100.0
-        else:
-            y = win
+    for i, (asset, y) in enumerate(cmp_view.series.items()):
         colour = _COMPARE_PALETTE[i % len(_COMPARE_PALETTE)]
         fig.add_trace(
             go.Scatter(
@@ -514,31 +470,18 @@ def _build_compare_chart(
 # --------------------------------------------------------------------------
 # Scan Board — full technical chart-book
 # --------------------------------------------------------------------------
-_RANGE_LABELS = ["3M", "6M", "1Y", "YTD", "Custom"]
+_RANGE_LABELS = list(mv.RANGE_LABELS)
 _SORT_OPTIONS = [
     "Asset", "Period", "RSI", "vs MA50", "vs MA200",
     "Distance to Support", "Distance to Resistance",
 ]
-_MA_LABELS = ["MA20", "MA50", "MA100", "MA200"]
-_MA_WINDOW = {"MA20": 20, "MA50": 50, "MA100": 100, "MA200": 200}
+_MA_LABELS = list(mv.MA_WINDOWS)
 _MA_COLOUR = {
     "MA20": "#ff7f0e",
     "MA50": "#9467bd",
     "MA100": "#8c564b",
     "MA200": "#7f7f7f",
 }
-
-
-def _range_start(range_label: str, end: pd.Timestamp) -> pd.Timestamp:
-    if range_label == "3M":
-        return end - pd.DateOffset(months=3)
-    if range_label == "6M":
-        return end - pd.DateOffset(months=6)
-    if range_label == "1Y":
-        return end - pd.DateOffset(years=1)
-    if range_label == "YTD":
-        return pd.Timestamp(year=end.year, month=1, day=1)
-    return end - pd.DateOffset(months=6)  # fallback for Custom / unknown
 
 
 def _available_presets(
@@ -558,8 +501,13 @@ def _available_presets(
     ordering for FX and US Equities). Callers must never
     ``sorted(...)`` these lists — CSV row order is the source of truth.
     """
-    all_loaded_set = set(loaded_prices) | set(loaded_rates)
-    all_loaded_ordered = reg.ordered_loaded(registry, all_loaded_set)
+    # Order-preserving union — a plain set() would lose deterministic
+    # input order for unregistered extras (ordered_loaded appends them
+    # in the order it receives them). Known registry assets still follow
+    # registry PM order regardless.
+    all_loaded = list(dict.fromkeys(list(loaded_prices) + list(loaded_rates)))
+    all_loaded_set = set(all_loaded)
+    all_loaded_ordered = reg.ordered_loaded(registry, all_loaded)
     presets: dict[str, list[str]] = {"All loaded": all_loaded_ordered}
     if registry is None or registry.empty:
         return presets
@@ -608,38 +556,6 @@ def _fmt_level(value: float, is_rate: bool) -> str:
     return f"{value:.4f}"
 
 
-def _build_frames(
-    universe: list[str],
-    loaded_rates: list[str],
-    eq_prices: pd.DataFrame,
-    rates_levels: pd.DataFrame,
-    ohlc_eq: dict,
-    ohlc_rates: dict,
-) -> dict[str, tuple[pd.DataFrame, bool]]:
-    """Return {asset: (full_frame, is_rate)} using OHLC when available.
-
-    An asset falls back to a Close-only frame (single "Close" column)
-    when its slot's source has no OHLC — legacy CSVs, uploads and
-    GitHub prices all take this path.
-    """
-    out: dict[str, tuple[pd.DataFrame, bool]] = {}
-    for asset in universe:
-        is_rate = asset in loaded_rates
-        ohlc_dict = ohlc_rates if is_rate else ohlc_eq
-        if asset in ohlc_dict and not ohlc_dict[asset].empty:
-            frame = ohlc_dict[asset]
-        else:
-            src = rates_levels if is_rate else eq_prices
-            if asset not in src.columns:
-                continue
-            close = src[asset].dropna()
-            if close.empty:
-                continue
-            frame = close.to_frame(name="Close")
-        out[asset] = (frame, is_rate)
-    return out
-
-
 def _build_technical_chart(
     asset: str,
     full_frame: pd.DataFrame,
@@ -675,17 +591,21 @@ def _build_technical_chart(
     * MAs computed on the full history so warm-up doesn't truncate.
     * Strict explicit ``x-range`` so every asset in a stack aligns
       pixel-for-pixel.
-    """
-    ohlc_available = tech.has_ohlc(full_frame)
-    use_ohlc = chart_type == "OHLC" and ohlc_available and not is_rate
-    if use_ohlc:
-        # Rebasing OHLC bars is visually misleading; force Level.
-        view_mode = "Level"
 
-    close = tech.close_of(full_frame).dropna()
-    window_mask = (close.index >= window_start) & (close.index <= window_end)
-    win_close = close[window_mask]
-    if win_close.empty:
+    All financial preparation (window slicing, rebasing scale, MAs,
+    RSI, daily changes, S/R) comes from
+    ``core.market_views.build_technical_view`` — this function only
+    draws.
+    """
+    view = mv.build_technical_view(
+        asset, full_frame, window_start, window_end,
+        view_mode=view_mode, chart_type=chart_type,
+        active_mas=active_mas, show_sr=show_sr,
+        include_rsi=show_rsi_panel, include_daily=show_daily_returns,
+        is_rate=is_rate,
+    )
+
+    if view.empty:
         fig = go.Figure()
         fig.update_layout(
             height=260,
@@ -698,43 +618,16 @@ def _build_technical_chart(
         fig.update_xaxes(range=[window_start, window_end])
         return fig
 
-    # Scale factor for Rebased-100 view (line charts only)
-    scale = 1.0
-    if view_mode == "Rebased 100" and not use_ohlc and not is_rate:
-        base = float(win_close.iloc[0])
-        if base != 0:
-            scale = 100.0 / base
-
-    # MAs on the FULL history so no truncation at the display start
-    ma_series: dict[str, pd.Series] = {}
-    for label in active_mas:
-        w = _MA_WINDOW[label]
-        if len(close) >= w:
-            ma_series[label] = tech.moving_average(close, w)
-
-    # S/R on the full frame (uses OHLC High/Low when available)
-    supports: list[float] = []
-    resistances: list[float] = []
-    if show_sr:
-        supports, resistances = tech.find_support_resistance(full_frame)
-
-    # RSI panel needs the full close for warm-up, then sliced to window
-    rsi_series = None
-    if show_rsi_panel and len(close) >= 15:
-        rsi_series = tech.rsi(close, 14)[window_mask]
-    include_rsi = rsi_series is not None and rsi_series.notna().any()
-
-    # Daily-returns pane data (bars). Uses window slice — we don't need
-    # warm-up here beyond the first bar of the window.
-    include_daily = show_daily_returns
-    if include_daily:
-        if is_rate:
-            daily_changes = win_close.diff().dropna() * 100.0  # bp
-        else:
-            daily_changes = win_close.pct_change().dropna() * 100.0  # %
-        include_daily = not daily_changes.empty
-    else:
-        daily_changes = None
+    use_ohlc = view.use_ohlc
+    view_mode = view.view_mode  # "Level" when OHLC forced it
+    scale = view.scale  # S/R display positioning only (§ presentation)
+    ma_series = view.ma_windowed
+    supports = view.supports
+    resistances = view.resistances
+    rsi_series = view.rsi_windowed
+    include_rsi = view.include_rsi
+    daily_changes = view.daily_changes
+    include_daily = view.include_daily
 
     # Pane layout — 1 to 3 rows. Explorer mode uses taller panes so the
     # single-asset view reads like a proper analysis chart, not a scan
@@ -774,7 +667,7 @@ def _build_technical_chart(
 
     # Price / OHLC pane
     if use_ohlc:
-        win_ohlc = full_frame.loc[window_mask]
+        win_ohlc = view.win_ohlc
         fig.add_trace(
             go.Ohlc(
                 x=win_ohlc.index,
@@ -788,7 +681,9 @@ def _build_technical_chart(
             **price_row,
         )
     else:
-        y = win_close * scale
+        # THE displayed series — identical object the notebook sees in
+        # TechnicalView.frame (already in display units).
+        y = view.frame["Close"]
         line_color = "#1f77b4"  # neutral — direction is in the metrics
         fig.add_trace(
             go.Scatter(
@@ -800,12 +695,14 @@ def _build_technical_chart(
             **price_row,
         )
 
-    # Moving-average overlays (sliced to window; rebased if applicable)
-    for label, series in ma_series.items():
-        y = series[window_mask]
+    # Moving-average overlays — straight from TechnicalView.frame
+    # (window-sliced, display units), same columns the notebook sees.
+    for label in ma_series:
+        if label not in view.frame.columns:
+            continue
+        y = view.frame[label]
         if y.dropna().empty:
             continue
-        y = y * scale
         fig.add_trace(
             go.Scatter(
                 x=y.index, y=y.values, mode="lines", name=label,
@@ -843,17 +740,15 @@ def _build_technical_chart(
     # Normalized view we plot the rebased last value (matches the y
     # scale) rather than the raw value.
     if is_rate:
-        raw_last = float(win_close.iloc[-1])
-        last_y = raw_last  # rates always Level
-        badge_txt = _fmt_level(raw_last, True)
+        last_y = view.last_raw  # rates always Level
+        badge_txt = _fmt_level(view.last_raw, True)
         badge_col = "#1f77b4"
     else:
-        raw_last = float(win_close.iloc[-1])
-        last_y = raw_last * scale
+        last_y = view.last_display
         if view_mode == "Rebased 100":
             badge_txt = f"{last_y:.2f}"
         else:
-            badge_txt = _fmt_level(raw_last, False)
+            badge_txt = _fmt_level(view.last_raw, False)
         badge_col = "#1f77b4"
 
     # Faint dotted horizontal at the current level. Use the nested
@@ -1021,22 +916,6 @@ def _render_technical_metrics(
     st.markdown(body, unsafe_allow_html=True)
 
 
-def _compute_asset_context(
-    frame: pd.DataFrame,
-    window_start: pd.Timestamp,
-    window_end: pd.Timestamp,
-    is_rate: bool,
-) -> tuple[tech.WindowMetrics, list[float], list[float]] | None:
-    """Compute metrics + S/R for one asset. Returns None if the window is empty."""
-    mask = (frame.index >= window_start) & (frame.index <= window_end)
-    window_frame = frame.loc[mask]
-    if window_frame.empty or len(window_frame) < 2:
-        return None
-    metrics = tech.compute_window_metrics(frame, window_frame, is_rate)
-    supports, resistances = tech.find_support_resistance(frame)
-    return metrics, supports, resistances
-
-
 def _render_scan_board(
     eq_prices: pd.DataFrame,
     rates_levels: pd.DataFrame,
@@ -1105,7 +984,7 @@ def _render_scan_board(
         st.info(f"No loaded assets in family `{preset}`.")
         return
 
-    frames = _build_frames(
+    frames = mv.build_frames(
         universe, loaded_rates,
         eq_prices, rates_levels, ohlc_eq, ohlc_rates,
     )
@@ -1121,12 +1000,12 @@ def _render_scan_board(
         )
         start = pd.Timestamp(custom)
     else:
-        start = _range_start(range_label, end)
+        start = mv.range_start(range_label, end)
 
     # ---- Per-asset context (metrics + S/R) — computed once, reused for sort + render
     contexts: dict[str, tuple[tech.WindowMetrics, list[float], list[float], bool]] = {}
     for asset, (frame, is_rate) in frames.items():
-        ctx = _compute_asset_context(frame, start, end, is_rate)
+        ctx = mv.compute_asset_context(frame, start, end, is_rate)
         if ctx is None:
             continue
         metrics, supports, resistances = ctx
