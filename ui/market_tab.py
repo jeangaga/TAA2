@@ -31,16 +31,22 @@ from core import technical as tech
 from ui.tables import render_table
 
 
-def _code_popover(snippet: str, *, key: str, container=None) -> None:
-    """Compact </> Code control: research snippet + copyable setup cell.
+def _code_popover(
+    snippet: str, *, key: str, container=None,
+    label: str = "</> Code", caption: str | None = None,
+) -> None:
+    """Compact code control: research snippet + copyable setup cell.
 
-    Pure formatting — building the snippet never touches the network or
-    session state; it only renders an already-known UI state as Python.
+    Two semantics share this widget: `</> Code` on the Asset Explorer
+    reproduces the CURRENT analysis/chart; `</> Data` on the Loaded
+    tables recreates THAT dataset as one DataFrame. Pure formatting —
+    building the snippet never touches the network or session state.
     """
     target = container if container is not None else st
-    with target.popover("</> Code", use_container_width=True):
+    with target.popover(label, use_container_width=True):
         st.caption(
-            "Standalone research snippet — same extraction core, same "
+            caption
+            or "Standalone research snippet — same extraction core, same "
             "transformed values as this view. Run the setup cell once "
             "per notebook first."
         )
@@ -50,7 +56,7 @@ def _code_popover(snippet: str, *, key: str, container=None) -> None:
             file_name=f"{key}.txt", mime="text/plain",
             key=f"code_dl_{key}",
         )
-        with st.expander("Setup cell (run once per notebook)"):
+        with st.expander("TAA setup cell (run once per notebook — Colab-ready)"):
             st.code(snip.build_setup_snippet(), language="python")
 
 # All market data preparation (summary stats, frame resolution, window
@@ -119,11 +125,17 @@ def render(
         st.info("No price data loaded.")
     else:
         _code_popover(
-            snip.build_market_summary_snippet(
+            snip.build_market_dataset_snippet(
                 assets=list(map(str, eq_prices.columns)),
                 is_rate=False, registry=registry,
             ),
-            key="market_summary_prices", container=p_code,
+            key="market_data_prices", container=p_code,
+            label="</> Data",
+            caption=(
+                "Recreate this table's dataset as one DataFrame "
+                "(`prices_df`) via the shared extraction core. Run the "
+                "setup cell once per notebook first."
+            ),
         )
         table = mv.build_market_summary(eq_prices, is_rate=False)
         render_table(table)
@@ -134,11 +146,17 @@ def render(
         st.info("No rate data loaded.")
     else:
         _code_popover(
-            snip.build_market_summary_snippet(
+            snip.build_market_dataset_snippet(
                 assets=list(map(str, rates_levels.columns)),
                 is_rate=True, registry=registry,
             ),
-            key="market_summary_rates", container=r_code,
+            key="market_data_rates", container=r_code,
+            label="</> Data",
+            caption=(
+                "Recreate this table's dataset as one DataFrame "
+                "(`rates_df`) via the shared extraction core. Run the "
+                "setup cell once per notebook first."
+            ),
         )
         table = mv.build_market_summary(rates_levels, is_rate=True)
         render_table(table)
