@@ -15,9 +15,12 @@ importable from non-Streamlit contexts (Colab notebook, tests).
 
 Schema
 ------
-* ``InternalName`` — the exact key used everywhere else in the app
-  (must match the column name in the price / rates CSV, and the
-  ``RIC Name`` values in the blotter).
+* ``InternalName`` — THE canonical asset key of the application: books
+  store it in their ``Asset`` column, market-data frames use it as the
+  column name, and every UI surface displays it. The legacy ``RIC`` /
+  ``RIC Name`` fields still exist at explicit compatibility boundaries
+  (the portfolio-engine adapter mirrors ``Asset`` into them), but they
+  are no longer the canonical application model.
 * ``DisplayName`` — human-readable label for charts and tables.
 * ``AssetClass`` — one of ``Equity``, ``FX``, ``Rate``.
 * ``YahooTicker`` — Yahoo Finance symbol; empty when no clean Yahoo
