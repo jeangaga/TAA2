@@ -5,13 +5,30 @@ standalone research script. NOTHING here touches the network, Streamlit
 or session state — opening a </> Code popover only calls these
 functions.
 
+Notebook contract (Colab workflow, same as FREDMACRO): the canonical
+setup cell (:func:`build_setup_snippet`) runs ONCE — Drive mount,
+``PROJECT_PATH`` on ``sys.path``, yfinance install, imports, ONE
+``reg.load_registry()``. Every generated snippet assumes it ran and
+therefore NEVER contains imports, ``sys.path`` edits, pip installs,
+Drive mounts or a ``load_registry()`` call — only the locked aliases
+``pd / np / px / go / make_subplots / reg / mv / tech / yahoo /
+official_rates / registry``.
+
 Template IDs
 ------------
-* ``market.single``          → :func:`build_market_single_snippet`
-* ``market.compare``         → :func:`build_market_compare_snippet`
-* ``market.summary_prices``  → :func:`build_market_summary_snippet(is_rate=False)`
-* ``market.summary_rates``   → :func:`build_market_summary_snippet(is_rate=True)`
-* setup cell                 → :func:`build_setup_snippet`
+* ``market.single``       → :func:`build_market_single_snippet`
+* ``market.compare``      → :func:`build_market_compare_snippet`
+* ``market.data_prices``  → :func:`build_market_dataset_snippet(is_rate=False)`
+* ``market.data_rates``   → :func:`build_market_dataset_snippet(is_rate=True)`
+* setup cell              → :func:`build_setup_snippet`
+
+Two distinct semantics coexist:
+
+* Loaded-table buttons (``market.data_*``) are DATASET exports —
+  "recreate THIS table's data as one DataFrame" (``prices_df`` /
+  ``rates_df``); the summary table is an optional, secondary extra.
+* Asset Explorer buttons (``market.single`` / ``market.compare``) are
+  ANALYSIS exports — "recreate THIS current chart/view".
 
 Generated code uses ONLY the approved extraction core
 (``core.asset_registry`` + ``core.adapters.yahoo`` for Yahoo assets,
@@ -37,7 +54,7 @@ from core import asset_registry as reg
 from core.adapters import official_rates as orx
 from core.market_views import MA_WINDOWS
 
-SETUP_FILENAME = "market_setup.py"
+SETUP_FILENAME = "taa_setup.py"
 
 # --------------------------------------------------------------------------
 # Shared helpers
@@ -117,21 +134,59 @@ def _no_extractor_comment(assets: list[str]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Setup cell (run once per notebook) — per-chart snippets assume it ran
+# Canonical TAA setup cell (run once per notebook) — every generated
+# snippet assumes it ran. Colab-ready AND plain-Python executable: the
+# Drive mount degrades to a local PROJECT_PATH, and the yfinance install
+# is a guarded subprocess call instead of IPython `!pip` magic.
+#
+# LOCKED alias contract (never generate different names per snippet):
+#   pd, np, px, go, make_subplots,
+#   reg, mv, tech, yahoo, official_rates, registry
+#
+# Future "fully standalone snippet" mode = prepend this cell to a
+# generated snippet; nothing else changes. Not implemented now.
 # --------------------------------------------------------------------------
 def build_setup_snippet() -> str:
     return (
-        "# --- Market research setup cell (run once per notebook) ---\n"
+        "# ============================================================\n"
+        "# TAA RESEARCH NOTEBOOK — SETUP\n"
+        "# Run once at the beginning of the notebook (Colab or local)\n"
+        "# ============================================================\n"
+        "import sys\n"
+        "\n"
+        "# Folder containing core/ and data/\n"
+        "try:\n"
+        "    from google.colab import drive   # Colab runtime\n"
+        "    drive.mount(\"/content/drive\")\n"
+        "    PROJECT_PATH = \"/content/drive/MyDrive/TAA\"\n"
+        "except ImportError:                  # local Jupyter\n"
+        "    PROJECT_PATH = r\"C:/Users/jeang/OneDrive/Documents/Claude/Projects/TAA\"\n"
+        "\n"
+        "if PROJECT_PATH not in sys.path:\n"
+        "    sys.path.insert(0, PROJECT_PATH)\n"
+        "\n"
+        "# Colab dependency — no-op when already installed\n"
+        "import importlib.util\n"
+        "import subprocess\n"
+        "if importlib.util.find_spec(\"yfinance\") is None:\n"
+        "    subprocess.check_call(\n"
+        "        [sys.executable, \"-m\", \"pip\", \"install\", \"-q\", \"yfinance\"]\n"
+        "    )\n"
+        "\n"
         "import pandas as pd\n"
+        "import numpy as np\n"
         "import plotly.express as px\n"
         "import plotly.graph_objects as go\n"
+        "from plotly.subplots import make_subplots\n"
         "\n"
         "from core import asset_registry as reg\n"
         "from core import market_views as mv\n"
+        "from core import technical as tech\n"
         "from core.adapters import yahoo\n"
         "from core.adapters import official_rates\n"
         "\n"
         "registry = reg.load_registry()\n"
+        "print(f\"TAA project loaded — {len(registry)} assets in registry\")\n"
     )
 
 
@@ -200,7 +255,7 @@ def build_market_single_snippet(
 
     lines: list[str] = [
         f"# {asset} — {chart_type} / {view_mode} · window {ws} → {we}",
-        "# (assumes the Market setup cell has run)",
+        "# (assumes the TAA setup cell has run)",
         "",
     ]
 
@@ -324,7 +379,7 @@ def build_market_compare_snippet(
 
     lines: list[str] = [
         f"# Compare — {view_mode} · window {ws} → {we}",
-        "# (assumes the Market setup cell has run)",
+        "# (assumes the TAA setup cell has run)",
         "",
     ]
     if missing:
@@ -378,19 +433,25 @@ def build_market_compare_snippet(
 
 
 # --------------------------------------------------------------------------
-# market.summary_prices / market.summary_rates
+# market.data_prices / market.data_rates
 # --------------------------------------------------------------------------
-def build_market_summary_snippet(
+def build_market_dataset_snippet(
     *,
     assets: list[str],
     is_rate: bool,
     registry=None,
 ) -> str:
-    """Standalone script reproducing a Loaded-prices/rates summary table.
+    """DATASET export for a Loaded-prices/rates table.
 
-    The 2y period comfortably covers the table's 1Y (252-observation)
-    horizon. Horizon math is NEVER re-implemented — the snippet calls
-    ``mv.build_market_summary`` exactly like the tab.
+    Main output is ONE raw DataFrame holding every asset currently shown
+    in the table — ``prices_df`` (Date | SPX | SX5E | …) or ``rates_df``
+    (Date | UST 10Y | UST 2Y | DE 2Y). Reproducing the Market summary
+    table is included only as an optional, secondary extra; horizon math
+    is never re-implemented.
+
+    The 2y history comfortably covers the summary's 1Y (252-observation)
+    horizon. Assets with no portable extractor are named in a comment,
+    never fabricated.
     """
     yahoo_assets = [a for a in assets if _source_for(a, registry) == "yahoo"]
     official_assets = (
@@ -401,12 +462,14 @@ def build_market_summary_snippet(
         a for a in assets
         if a not in yahoo_assets and a not in official_assets
     ]
-    label = "rates" if is_rate else "prices"
+    label = "rates (yield levels)" if is_rate else "prices (Equity + FX)"
+    df_var = "rates_df" if is_rate else "prices_df"
     end = pd.Timestamp.today().normalize()
+    start_2y = (end - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
 
     lines: list[str] = [
-        f"# Loaded {label} summary — same horizons as the Market tab",
-        "# (assumes the Market setup cell has run)",
+        f"# Loaded {label} — dataset export → {df_var}",
+        "# (assumes the TAA setup cell has run)",
         "",
     ]
     if missing:
@@ -415,30 +478,33 @@ def build_market_summary_snippet(
     if not yahoo_assets and not official_assets:
         return "\n".join(lines) + "\n"
 
-    raw_var = f"{label}_raw"
     if yahoo_assets:
         lines.append(_yahoo_extract_block(yahoo_assets, "2y", "_").rstrip())
-        lines.append(f"{raw_var} = yahoo.to_close_frame(batch)")
+        lines.append(f"{df_var} = yahoo.to_close_frame(batch)")
         lines.append("")
     if official_assets:
-        # Distinct target name — must never collide with the Yahoo close
-        # frame ("rates_raw") built above for the same summary.
-        lines.append(_official_extract_block(
-            official_assets,
-            (end - pd.DateOffset(years=2)).strftime("%Y-%m-%d"),
-            end.strftime("%Y-%m-%d"),
-            target="official_raw",
-        ).rstrip())
         if yahoo_assets:
+            # Distinct target name — must never collide with the Yahoo
+            # close frame built above for the same dataset.
+            lines.append(_official_extract_block(
+                official_assets, start_2y, end.strftime("%Y-%m-%d"),
+                target="official_raw",
+            ).rstrip())
             lines.append(
-                f"{raw_var} = official_rates.merge_rate_frames({raw_var}, official_raw)"
+                f"{df_var} = official_rates.merge_rate_frames({df_var}, official_raw)"
             )
         else:
-            lines.append(f"{raw_var} = official_raw")
+            lines.append(_official_extract_block(
+                official_assets, start_2y, end.strftime("%Y-%m-%d"),
+                target=df_var,
+            ).rstrip())
         lines.append("")
 
     lines += [
-        f"summary = mv.build_market_summary({raw_var}, is_rate={is_rate})",
+        f"display({df_var}.tail())",
+        "",
+        "# Optional: reproduce the Market summary table",
+        f"summary = mv.build_market_summary({df_var}, is_rate={is_rate})",
         "display(summary)",
     ]
     return "\n".join(lines) + "\n"
