@@ -192,14 +192,18 @@ def _invert_ohlc(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _apply_transform(df: pd.DataFrame, transform: str | None) -> pd.DataFrame:
-    """Dispatch to the right post-download transformation."""
+    """Dispatch to the right post-download transformation.
+
+    ``None`` / ``""`` → identity; ``"inverse"`` → :func:`_invert_ohlc`.
+    Any other non-empty name raises — a typo like ``"inverze"`` must
+    fail loudly instead of silently returning the untransformed series
+    in the wrong quotation convention.
+    """
     if not transform:
         return df
     if transform == "inverse":
         return _invert_ohlc(df)
-    # Unknown transforms are ignored rather than raising — the source
-    # ticker is still useful even if the transform label was mistyped.
-    return df
+    raise ValueError(f"Unsupported Yahoo transform: {transform!r}")
 
 
 def download_batch(

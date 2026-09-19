@@ -67,10 +67,19 @@ _PERIOD_OFFSETS = {
 
 
 def period_to_dates(period: str, today=None) -> tuple[str, str]:
-    """Map a period label to ``(start_date, end_date)`` ISO strings."""
+    """Map a period label to ``(start_date, end_date)`` ISO strings.
+
+    An unknown period raises — the Streamlit selector can't produce one,
+    but a notebook typo must fail loudly rather than silently returning
+    a 2-year window.
+    """
+    if period not in _PERIOD_OFFSETS:
+        raise ValueError(
+            f"Unknown period {period!r} — expected one of {PERIOD_CHOICES}."
+        )
     end = pd.Timestamp(today) if today is not None else pd.Timestamp.today()
     end = end.normalize()
-    start = end - _PERIOD_OFFSETS.get(period, _PERIOD_OFFSETS["2y"])
+    start = end - _PERIOD_OFFSETS[period]
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
 
